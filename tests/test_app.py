@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -49,6 +50,19 @@ class FakeVoiceClient:
 
     async def synthesize_orchestrator(self, text: str) -> bytes:
         """Return fake MPEG bytes for a speech line."""
+        return f"audio:{text}".encode()
+
+
+class RecordingVoiceClient:
+    """Voice fake that records synthesis requests."""
+
+    def __init__(self) -> None:
+        """Initialize the request log."""
+        self.calls: list[str] = []
+
+    async def synthesize_orchestrator(self, text: str) -> bytes:
+        """Record the requested speech and return fake MPEG bytes."""
+        self.calls.append(text)
         return f"audio:{text}".encode()
 
 
@@ -149,6 +163,23 @@ def test_api_start_queues_orchestrator_speech_for_browser_playback():
     speech_events = [event for event in payload["events"] if event["event_type"] == "presentation_command"]
     assert speech_events[0]["payload"]["voice"] == "orchestrator"
     assert speech_events[0]["payload"]["speech"] == "Please lay out the flop."
+
+
+def test_runtime_prewarms_orchestrator_voice_for_new_speech_events():
+    async def scenario() -> None:
+        voice = RecordingVoiceClient()
+        runtime = build_test_runtime()
+        runtime.voice_client_factory = lambda: voice
+
+        result = await runtime.start_game()
+        await asyncio.sleep(0)
+
+        speech_event = next(event for event in result.events if event.event_type == "presentation_command")
+        assert voice.calls == ["Please lay out the flop."]
+        assert await runtime.synthesize_orchestrator_event(speech_event.event_id) == b"audio:Please lay out the flop."
+        assert voice.calls == ["Please lay out the flop."]
+
+    asyncio.run(scenario())
 
 
 def test_api_human_action_advances_until_eliza_input_needed():

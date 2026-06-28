@@ -12,9 +12,14 @@ const FRAME_MIME_TYPE = "image/png";
 
 const spokenEventIds = new Set();
 const speechInFlight = new Set();
+const queuedSpeechEventIds = new Set();
+const speechQueue = [];
 let cameraStream = null;
 let frameTimer = null;
 let frameInFlight = false;
+let speechQueueActive = false;
+let currentSpeechAudio = null;
+let shouldPlayInitialSnapshotSpeech = false;
 let shouldSubmitBoardFrames = false;
 let hasRenderedInitialSnapshot = false;
 
@@ -245,10 +250,35 @@ function renderEvents(events) {
 function handlePresentationEvents(events) {
   for (const event of events) {
     if (event.event_type === "presentation_command" && event.payload?.voice === "orchestrator") {
-      playOrchestratorSpeech(event.event_id).catch(() => {
-        setCameraStatus("Voice playback failed");
-      });
+      enqueueOrchestratorSpeech(event.event_id);
     }
+  }
+}
+
+function enqueueOrchestratorSpeech(eventId) {
+  if (spokenEventIds.has(eventId) || speechInFlight.has(eventId) || queuedSpeechEventIds.has(eventId)) {
+    return;
+  }
+
+  queuedSpeechEventIds.add(eventId);
+  speechQueue.push(eventId);
+  drainSpeechQueue().catch(() => setCameraStatus("Voice playback failed"));
+}
+
+async function drainSpeechQueue() {
+  if (speechQueueActive) {
+    return;
+  }
+
+  speechQueueActive = true;
+  try {
+    while (speechQueue.length > 0) {
+      const eventId = speechQueue.shift();
+      queuedSpeechEventIds.delete(eventId);
+      await playOrchestratorSpeech(eventId);
+    }
+  } finally {
+    speechQueueActive = false;
   }
 }
 
@@ -258,17 +288,51 @@ async function playOrchestratorSpeech(eventId) {
   }
 
   speechInFlight.add(eventId);
+  let audioUrl = null;
+  let audio = null;
   try {
     const response = await fetch(`/api/voice/orchestrator/${eventId}`);
     if (!response.ok) {
       throw new Error("Voice request failed.");
     }
-    const audio = new Audio(URL.createObjectURL(await response.blob()));
+    audioUrl = URL.createObjectURL(await response.blob());
+    audio = new Audio(audioUrl);
+    currentSpeechAudio = audio;
+    await playAudioToEnd(audio);
     spokenEventIds.add(eventId);
-    await audio.play();
   } finally {
+    if (currentSpeechAudio === audio) {
+      currentSpeechAudio = null;
+    }
+    if (audioUrl) {
+      URL.revokeObjectURL(audioUrl);
+    }
     speechInFlight.delete(eventId);
   }
+}
+
+function playAudioToEnd(audio) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      audio.removeEventListener("ended", handleEnded);
+      audio.removeEventListener("error", handleError);
+    };
+    const handleEnded = () => {
+      cleanup();
+      resolve();
+    };
+    const handleError = () => {
+      cleanup();
+      reject(new Error("Voice playback failed."));
+    };
+
+    audio.addEventListener("ended", handleEnded, { once: true });
+    audio.addEventListener("error", handleError, { once: true });
+    audio.play().catch((error) => {
+      cleanup();
+      reject(error);
+    });
+  });
 }
 
 function renderSnapshot(snapshot) {
@@ -292,7 +356,7 @@ function renderSnapshot(snapshot) {
   renderActions(state.legal_actions);
   renderUncertainties(state.uncertainties);
   renderEvents(snapshot.events);
-  if (hasRenderedInitialSnapshot) {
+  if (hasRenderedInitialSnapshot || shouldPlayInitialSnapshotSpeech) {
     handlePresentationEvents(snapshot.events);
   } else {
     for (const event of snapshot.events) {
@@ -300,8 +364,9 @@ function renderSnapshot(snapshot) {
         spokenEventIds.add(event.event_id);
       }
     }
-    hasRenderedInitialSnapshot = true;
   }
+  hasRenderedInitialSnapshot = true;
+  shouldPlayInitialSnapshotSpeech = false;
   updateBoardFrameSubmission(state.waiting_for?.type === "public_board_cards");
 
   if (apiStatus) {
@@ -338,6 +403,9 @@ function connectEvents() {
 }
 
 async function submitGameControl(action) {
+  if (action === "start") {
+    shouldPlayInitialSnapshotSpeech = true;
+  }
   const response = await fetch(`/api/game/${action}`, { method: "POST" });
 
   if (!response.ok) {
@@ -345,6 +413,7 @@ async function submitGameControl(action) {
   }
 
   const payload = await response.json();
+  handlePresentationEvents(payload.events);
   if (apiStatus) {
     apiStatus.textContent = payload.reason;
   }

@@ -221,21 +221,37 @@ class DashboardRuntime:
 
     async def handle_new_events(self, events: list[GameEvent]) -> None:
         """Handle side effects for newly appended orchestrator events."""
-        _ = events
+        for event in events:
+            if _is_orchestrator_speech_event(event):
+                self._queue_orchestrator_synthesis(event.event_id)
 
     async def synthesize_orchestrator_event(self, event_id: str) -> bytes:
         """Return MPEG audio for one queued orchestrator speech event."""
         if event_id in self._audio_cache:
             return self._audio_cache[event_id]
+        task = self._queue_orchestrator_synthesis(event_id)
+        if task is None:
+            return self._audio_cache[event_id]
+        return await task
+
+    def _queue_orchestrator_synthesis(self, event_id: str) -> asyncio.Task[bytes] | None:
+        """Start synthesis for a speech event unless audio is already ready."""
+        if event_id in self._audio_cache:
+            return None
         if event_id in self._audio_tasks:
-            return await self._audio_tasks[event_id]
+            return self._audio_tasks[event_id]
 
         task = asyncio.create_task(self._synthesize_orchestrator_event(event_id))
         self._audio_tasks[event_id] = task
-        try:
-            return await task
-        finally:
+        task.add_done_callback(lambda completed: self._finalize_audio_task(event_id, completed))
+        return task
+
+    def _finalize_audio_task(self, event_id: str, task: asyncio.Task[bytes]) -> None:
+        """Forget completed synthesis tasks while keeping successful audio cached."""
+        if self._audio_tasks.get(event_id) is task:
             self._audio_tasks.pop(event_id, None)
+        with suppress(asyncio.CancelledError, Exception):
+            task.result()
 
     async def _synthesize_orchestrator_event(self, event_id: str) -> bytes:
         """Synthesize and cache one orchestrator speech event."""
@@ -262,3 +278,11 @@ class DashboardRuntime:
 
 def _public_error_message(exc: Exception) -> str:
     return str(exc) or exc.__class__.__name__
+
+
+def _is_orchestrator_speech_event(event: GameEvent) -> bool:
+    return (
+        event.event_type == EventType.PRESENTATION_COMMAND
+        and event.payload.get("voice") == "orchestrator"
+        and isinstance(event.payload.get("speech"), str)
+    )
