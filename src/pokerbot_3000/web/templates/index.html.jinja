@@ -7,41 +7,184 @@
     <link rel="stylesheet" href="{{ request.url_for('static', path='styles.css') }}">
     <script type="module" src="{{ request.url_for('static', path='app.js') }}"></script>
   </head>
-  <body class="min-h-screen text-ink antialiased">
-    <main class="mx-auto grid min-h-screen w-full max-w-6xl content-center gap-8 px-6 py-10 md:grid-cols-[1.2fr_0.8fr]">
-      <section class="space-y-6">
-        <p class="text-sm font-semibold uppercase tracking-[0.18em] text-felt">Hackathon scaffold</p>
-        <div class="space-y-4">
-          <h1 class="max-w-3xl text-5xl font-black leading-tight sm:text-6xl">{{ app_name }}</h1>
-          <p class="max-w-2xl text-lg leading-8 text-neutral-700">
-            A starter control surface for a poker table orchestrator: table state, perception, voice commands,
-            software agents, and robot reactions will meet here.
-          </p>
+  <body class="min-h-screen bg-table text-ink antialiased">
+    <main class="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
+      <header class="flex flex-wrap items-end justify-between gap-4 border-b border-neutral-300 pb-4">
+        <div>
+          <p class="text-sm font-semibold uppercase tracking-[0.18em] text-felt">Python orchestrator</p>
+          <h1 class="mt-1 text-3xl font-black leading-tight sm:text-4xl">{{ app_name }}</h1>
         </div>
-        <div class="flex flex-wrap gap-3 text-sm font-semibold">
-          <span class="rounded border border-neutral-300 bg-white/70 px-3 py-2">FastAPI</span>
-          <span class="rounded border border-neutral-300 bg-white/70 px-3 py-2">Jinja</span>
-          <span class="rounded border border-neutral-300 bg-white/70 px-3 py-2">Tailwind CSS</span>
-          <span class="rounded border border-neutral-300 bg-white/70 px-3 py-2">esbuild</span>
+        <div class="control-bar" aria-label="Game controls">
+          <button class="control-button control-button-primary" type="button" data-game-control="start">Start</button>
+          <button class="control-button" type="button" data-game-control="stop">Stop</button>
+        </div>
+        <div class="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
+          <div class="metric">
+            <span class="metric-label">Hand</span>
+            <strong>{{ state.hand_id }}</strong>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Street</span>
+            <strong>{{ state.street }}</strong>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Pot</span>
+            <strong>{{ state.pot }}</strong>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Waiting</span>
+            <strong>{{ state.waiting_for.type if state.waiting_for else "none" }}</strong>
+          </div>
+        </div>
+      </header>
+
+      <section class="grid gap-4 lg:grid-cols-[1.5fr_1fr]">
+        <div class="panel">
+          <div class="panel-heading">
+            <h2>Table State</h2>
+            <span data-api-status class="status-pill">API pending</span>
+          </div>
+          <div class="grid gap-3 md:grid-cols-3">
+            {% for seat, player in players %}
+              <article class="seat-panel{% if seat == state.active_player_seat %} seat-panel-active{% endif %}">
+                <div class="flex items-start justify-between gap-3">
+                  <div>
+                    <p class="text-sm font-semibold text-neutral-600">S{{ seat }}</p>
+                    <h3 class="text-xl font-black">{{ player.name }}</h3>
+                  </div>
+                  {% if seat == state.dealer_seat %}
+                    <span class="dealer-button">D</span>
+                  {% endif %}
+                </div>
+                <dl class="mt-4 grid gap-2 text-sm">
+                  <div class="row-stat">
+                    <dt>Status</dt>
+                    <dd>{{ player.status }}</dd>
+                  </div>
+                  <div class="row-stat">
+                    <dt>Stack</dt>
+                    <dd>{{ player.stack }}</dd>
+                  </div>
+                  <div class="row-stat">
+                    <dt>Committed</dt>
+                    <dd>{{ player.committed_this_street }}</dd>
+                  </div>
+                </dl>
+              </article>
+            {% endfor %}
+          </div>
+        </div>
+
+        <aside class="panel">
+          <div class="panel-heading">
+            <h2>Board</h2>
+            <span class="status-pill">{{ state.board_source }}</span>
+          </div>
+          <div class="card-row">
+            {% if state.board %}
+              {% for card in state.board %}
+                <span class="playing-card">{{ card }}</span>
+              {% endfor %}
+            {% else %}
+              <span class="empty-state">No board cards recognised</span>
+            {% endif %}
+          </div>
+          <dl class="mt-4 grid gap-2 text-sm">
+            <div class="row-stat">
+              <dt>Engine</dt>
+              <dd>{{ state.automation_status }}</dd>
+            </div>
+            <div class="row-stat">
+              <dt>Active seat</dt>
+              <dd>S{{ state.active_player_seat }}</dd>
+            </div>
+            {% if state.waiting_for %}
+              <div class="row-stat">
+                <dt>Paused for</dt>
+                <dd>{{ state.waiting_for.reason }}</dd>
+              </div>
+            {% endif %}
+            <div class="row-stat">
+              <dt>To call</dt>
+              <dd>{{ state.current_bet_to_call }}</dd>
+            </div>
+            <div class="row-stat">
+              <dt>Min raise</dt>
+              <dd>{{ state.min_raise_to }}</dd>
+            </div>
+          </dl>
+        </aside>
+      </section>
+
+      <section class="grid gap-4 lg:grid-cols-3">
+        <div class="panel">
+          <div class="panel-heading">
+            <h2>Private Recognition</h2>
+          </div>
+          <div class="space-y-3">
+            {% for private_state in private_states %}
+              <div class="status-row">
+                <div>
+                  <p class="font-bold">{{ private_state.agent_id|title }}</p>
+                  <p class="text-sm text-neutral-600">S{{ private_state.seat }} - {{ private_state.hole_cards|length }}/2 cards</p>
+                </div>
+                <span class="status-pill">{{ "%.0f"|format(private_state.confidence * 100) }}%</span>
+              </div>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-heading">
+            <h2>Clients</h2>
+          </div>
+          <div class="space-y-3">
+            {% for client in client_statuses %}
+              <div class="status-row">
+                <div>
+                  <p class="font-bold">{{ client.client_id|replace("_", " ")|title }}</p>
+                  <p class="text-sm text-neutral-600">{{ client.status }}</p>
+                </div>
+                <span class="status-pill">{{ client.connection }}</span>
+              </div>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-heading">
+            <h2>Legal Actions</h2>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            {% for action in state.legal_actions %}
+              <span class="action-chip">{{ action }}</span>
+            {% endfor %}
+          </div>
+          <div class="mt-4 border-t border-neutral-200 pt-4">
+            <p class="text-sm font-bold text-neutral-700">Known gaps</p>
+            <ul class="mt-2 space-y-1 text-sm text-neutral-600">
+              {% for uncertainty in state.uncertainties %}
+                <li>{{ uncertainty }}</li>
+              {% endfor %}
+            </ul>
+          </div>
         </div>
       </section>
 
-      <section class="rounded-lg border border-neutral-300 bg-white/75 p-5 shadow-sm">
-        <h2 class="text-base font-bold uppercase tracking-[0.12em] text-neutral-600">Starter lanes</h2>
-        <div class="mt-4 grid gap-3">
-          <div data-status-item class="rounded border border-neutral-200 bg-white p-4">
-            <p class="font-bold">Game orchestrator</p>
-            <p class="mt-1 text-sm text-neutral-600">Canonical state and action validation will land here first.</p>
-          </div>
-          <div data-status-item class="rounded border border-neutral-200 bg-white p-4">
-            <p class="font-bold">Perception and voice</p>
-            <p class="mt-1 text-sm text-neutral-600">Future services can emit structured observations and actions.</p>
-          </div>
-          <div data-status-item class="rounded border border-neutral-200 bg-white p-4">
-            <p class="font-bold">Live table UI</p>
-            <p class="mt-1 text-sm text-neutral-600">This page is the first thin slice of the operator surface.</p>
-          </div>
+      <section class="panel flex-1">
+        <div class="panel-heading">
+          <h2>Event Log</h2>
+          <span class="status-pill">{{ events|length }} shown</span>
         </div>
+        <ol class="event-list" data-event-list>
+          {% for event in events|reverse %}
+            <li>
+              <span>{{ event.event_type }}</span>
+              <strong>{{ event.summary }}</strong>
+              <time>{{ event.created_at.strftime("%H:%M:%S") }}</time>
+            </li>
+          {% endfor %}
+        </ol>
       </section>
     </main>
   </body>

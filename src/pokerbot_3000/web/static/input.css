@@ -4,19 +4,115 @@
   --font-sans: Inter, ui-sans-serif, system-ui, sans-serif;
   --color-felt: #176b4d;
   --color-ink: #171717;
-  --color-signal: #eab308;
+  --color-clay: #b84a35;
+  --color-table: #f4f5f2;
+  --color-signal: #c89d19;
 }
 
 @layer base {
   body {
-    background:
-      radial-gradient(circle at top left, rgb(255 255 255 / 18%), transparent 30rem),
-      linear-gradient(135deg, #f7f3ea 0%, #e8eee7 48%, #dfe9ec 100%);
+    background: #f4f5f2;
   }
 }
 
 @layer components {
+  .action-chip {
+    @apply rounded border border-felt/30 bg-felt/10 px-3 py-2 text-sm font-bold text-felt;
+  }
+
+  .card-row {
+    @apply flex min-h-24 flex-wrap items-center gap-3 rounded border border-neutral-200 bg-white p-3;
+  }
+
+  .control-bar {
+    @apply flex items-center gap-2;
+  }
+
+  .control-button {
+    @apply rounded border border-neutral-300 bg-white px-4 py-2 text-sm font-black uppercase tracking-[0.08em] text-neutral-700 shadow-sm;
+  }
+
+  .control-button-primary {
+    @apply border-felt bg-felt text-white;
+  }
+
+  .dealer-button {
+    @apply grid size-8 place-items-center rounded-full border border-clay bg-white text-sm font-black text-clay;
+  }
+
+  .empty-state {
+    @apply text-sm font-semibold text-neutral-500;
+  }
+
+  .event-list {
+    @apply divide-y divide-neutral-200 text-sm;
+  }
+
+  .event-list li {
+    @apply grid gap-2 py-3 sm:grid-cols-[11rem_1fr_5rem];
+  }
+
+  .event-list span {
+    @apply font-semibold text-felt;
+  }
+
+  .event-list time {
+    @apply text-neutral-500 sm:text-right;
+  }
+
   .is-ready {
     border-color: rgb(23 107 77 / 45%);
+  }
+
+  .metric {
+    @apply min-w-24 rounded border border-neutral-300 bg-white px-3 py-2;
+  }
+
+  .metric-label {
+    @apply block text-xs font-semibold uppercase tracking-[0.12em] text-neutral-500;
+  }
+
+  .panel {
+    @apply rounded-lg border border-neutral-300 bg-white p-4 shadow-sm;
+  }
+
+  .panel-heading {
+    @apply mb-4 flex flex-wrap items-center justify-between gap-3;
+  }
+
+  .panel-heading h2 {
+    @apply text-base font-black uppercase tracking-[0.12em] text-neutral-700;
+  }
+
+  .playing-card {
+    @apply grid h-20 w-14 place-items-center rounded border border-neutral-300 bg-white text-xl font-black shadow-sm;
+  }
+
+  .row-stat {
+    @apply flex items-center justify-between gap-3 rounded border border-neutral-200 px-3 py-2;
+  }
+
+  .row-stat dt {
+    @apply font-semibold text-neutral-500;
+  }
+
+  .row-stat dd {
+    @apply font-bold;
+  }
+
+  .seat-panel {
+    @apply rounded-lg border border-neutral-200 bg-white p-4;
+  }
+
+  .seat-panel-active {
+    @apply border-felt bg-felt/5;
+  }
+
+  .status-pill {
+    @apply rounded border border-neutral-300 bg-neutral-50 px-2 py-1 text-xs font-bold uppercase tracking-[0.08em] text-neutral-600;
+  }
+
+  .status-row {
+    @apply flex min-h-16 items-center justify-between gap-3 rounded border border-neutral-200 px-3 py-2;
   }
 }
