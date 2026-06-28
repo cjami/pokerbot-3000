@@ -95,6 +95,8 @@ def test_read_hole_cards_uses_strict_schema_and_python_metadata():
     result = asyncio.run(client.read_hole_cards("reachy", frame))
 
     payload = captured_payloads[0]
+    assert payload["temperature"] == 0.0
+    assert payload["reasoning_effort"] == "none"
     response_format = payload["response_format"]
     assert isinstance(response_format, dict)
     assert response_format["type"] == "json_schema"
@@ -128,3 +130,41 @@ def test_read_hole_cards_uses_strict_schema_and_python_metadata():
         {"rank": "ace", "suit": "spades"},
         {"rank": "king", "suit": "diamonds"},
     ]
+
+
+def test_image_processing_requests_disable_sampling_and_thinking():
+    captured_payloads: list[JsonObject] = []
+
+    def fake_transport(url: str, payload: JsonObject, _headers: Mapping[str, str], _timeout: float) -> JsonObject:
+        captured_payloads.append(payload)
+        assert url.endswith("/chat/completions")
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "cards": [
+                                    {"rank": "ace", "suit": "spades"},
+                                    {"rank": "king", "suit": "diamonds"},
+                                    {"rank": "queen", "suit": "clubs"},
+                                ],
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    client = CerebrasLlmClient(CerebrasConfig(api_key="test-key"), transport=fake_transport)
+    frame = ImageFrame(source="public_board", data_uri="data:image/jpeg;base64,test")
+
+    cards = asyncio.run(client.read_board_cards(frame))
+
+    assert [card.model_dump() for card in cards] == [
+        {"rank": "ace", "suit": "spades"},
+        {"rank": "king", "suit": "diamonds"},
+        {"rank": "queen", "suit": "clubs"},
+    ]
+    assert captured_payloads[0]["temperature"] == 0.0
+    assert captured_payloads[0]["reasoning_effort"] == "none"

@@ -64,6 +64,7 @@ class EventType(StrEnum):
     AGENT_DECISION = "agent_decision"
     ENGINE_PAUSED = "engine_paused"
     VISION_OBSERVATION = "vision_observation"
+    BOARD_CARDS_COMMITTED = "board_cards_committed"
     PRIVATE_CARD_OBSERVATION = "private_card_observation"
     PRESENTATION_COMMAND = "presentation_command"
 
@@ -90,8 +91,19 @@ class ClientConnectionState(StrEnum):
 class PendingInputType(StrEnum):
     """External input currently blocking automated orchestration."""
 
+    PUBLIC_BOARD_CARDS = "public_board_cards"
     HUMAN_ACTION = "human_action"
     PRIVATE_CARDS = "private_cards"
+
+
+class BoardRecognitionStatus(StrEnum):
+    """Lifecycle status for public board-card recognition."""
+
+    IDLE = "idle"
+    WAITING = "waiting"
+    DETECTING = "detecting"
+    COMPLETE = "complete"
+    ERROR = "error"
 
 
 class PokerBaseModel(BaseModel):
@@ -133,10 +145,42 @@ class PendingInput(PokerBaseModel):
     """External input the orchestrator needs before it can keep running."""
 
     type: PendingInputType
-    seat: int = Field(ge=1, le=3)
+    seat: int | None = Field(default=None, ge=1, le=3)
     agent_id: str | None = None
     client_id: ClientId | None = None
     reason: str
+
+
+class PublicTableObservation(PokerBaseModel):
+    """Structured public table perception result."""
+
+    source: str = "main_table_camera"
+    dealer_seat: int | None = Field(default=None, ge=1, le=3)
+    board_cards: list[Card] = Field(default_factory=list, max_length=5)
+    street_hint: Street | None = None
+    pot_has_chips: bool | None = None
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    notes: str | None = None
+
+
+class BoardRecognitionSnapshot(PokerBaseModel):
+    """Public summary of board-recognition progress."""
+
+    status: BoardRecognitionStatus = BoardRecognitionStatus.IDLE
+    expected_card_count: int | None = Field(default=None, ge=0, le=5)
+    latest_observation: PublicTableObservation | None = None
+    stable_sample_count: int = Field(default=0, ge=0)
+    required_stable_samples: int = Field(default=2, ge=1)
+    confidence_threshold: float = Field(default=0.75, ge=0.0, le=1.0)
+    last_error: str | None = None
+    instruction: str | None = None
+
+
+class PublicBoardFrameInput(PokerBaseModel):
+    """Browser-captured public table frame submitted for recognition."""
+
+    source: str = "dashboard_browser_camera"
+    data_uri: str = Field(min_length=32)
 
 
 class PublicGameState(PokerBaseModel):
@@ -158,6 +202,7 @@ class PublicGameState(PokerBaseModel):
     legal_actions: list[ActionType] = Field(default_factory=list)
     automation_status: str = "stopped"
     waiting_for: PendingInput | None = None
+    board_recognition: BoardRecognitionSnapshot = Field(default_factory=BoardRecognitionSnapshot)
     last_actions: list[str] = Field(default_factory=list)
     uncertainties: list[str] = Field(default_factory=list)
 
@@ -200,18 +245,6 @@ class GameEvent(PokerBaseModel):
     summary: str
     payload: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-
-
-class PublicTableObservation(PokerBaseModel):
-    """Structured public table perception result."""
-
-    source: str = "main_table_camera"
-    dealer_seat: int | None = Field(default=None, ge=1, le=3)
-    board_cards: list[Card] = Field(default_factory=list, max_length=5)
-    street_hint: Street | None = None
-    pot_has_chips: bool | None = None
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
-    notes: str | None = None
 
 
 class PrivateCardObservation(PokerBaseModel):

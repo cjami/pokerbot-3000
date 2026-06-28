@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from pokerbot_3000.domain.models import (
     ActionType,
+    BoardRecognitionSnapshot,
+    BoardRecognitionStatus,
     ClientConnectionState,
     ClientId,
     ClientStatus,
@@ -30,6 +33,9 @@ from pokerbot_3000.domain.models import (
 )
 from pokerbot_3000.orchestrator.agents import AgentProfile, StubPokerAgent
 
+if TYPE_CHECKING:
+    from pokerbot_3000.domain.cards import Card
+
 
 @dataclass(frozen=True, slots=True)
 class DemoDefaults:
@@ -41,6 +47,8 @@ class DemoDefaults:
     big_blind: int = 20
     dealer_seat: int = 1
     active_player_seat: int = 1
+    board_confidence_threshold: float = 0.75
+    required_stable_board_samples: int = 2
 
 
 class InMemoryOrchestrator:
@@ -57,6 +65,7 @@ class InMemoryOrchestrator:
         self._agent = StubPokerAgent()
         self._agent_profiles = self._build_agent_profiles()
         self._events: list[GameEvent] = []
+        self._last_valid_board_candidate: tuple[tuple[str, str], ...] | None = None
         self._append_event(
             EventType.SYSTEM,
             source="orchestrator",
@@ -84,6 +93,21 @@ class InMemoryOrchestrator:
         """Return the most recent event-log entries."""
         return [event.model_copy(deep=True) for event in self._events[-limit:]]
 
+    def event_count(self) -> int:
+        """Return the current in-memory event count."""
+        return len(self._events)
+
+    def event_by_id(self, event_id: str) -> GameEvent | None:
+        """Return one event by id when it is still in memory."""
+        for event in self._events:
+            if event.event_id == event_id:
+                return event.model_copy(deep=True)
+        return None
+
+    def needs_public_board_observation(self) -> bool:
+        """Return whether the engine is currently blocked on public board recognition."""
+        return self._is_waiting_for(PendingInputType.PUBLIC_BOARD_CARDS)
+
     def start_game(self) -> OperatorControlResult:
         """Start a fresh demo hand and run until the first external input."""
         event_start = len(self._events)
@@ -97,6 +121,7 @@ class InMemoryOrchestrator:
 
         self._state = self._build_initial_state(self._defaults)
         self._private_states = self._build_private_states()
+        self._last_valid_board_candidate = None
         self._append_event(
             EventType.GAME_STARTED,
             source="dashboard",
@@ -104,10 +129,10 @@ class InMemoryOrchestrator:
             payload={"hand_id": self._state.hand_id},
         )
         self._set_active_player(self._defaults.active_player_seat)
-        self._pause_for_human_action(self._defaults.active_player_seat)
+        self._request_public_board_cards(3)
         return OperatorControlResult(
             accepted=True,
-            reason="Game started; engine paused for the first external input.",
+            reason="Game started; waiting for the flop.",
             events=self.events_since(event_start),
             state=self.public_state(),
         )
@@ -126,6 +151,11 @@ class InMemoryOrchestrator:
         self._state.automation_status = "stopped"
         self._state.waiting_for = None
         self._state.legal_actions = []
+        self._state.board_recognition = BoardRecognitionSnapshot(
+            confidence_threshold=self._defaults.board_confidence_threshold,
+            required_stable_samples=self._defaults.required_stable_board_samples,
+        )
+        self._last_valid_board_candidate = None
         self._append_event(
             EventType.GAME_STOPPED,
             source="dashboard",
@@ -167,17 +197,41 @@ class InMemoryOrchestrator:
         )
 
     def record_public_observation(self, observation: PublicTableObservation) -> ObservationReceipt:
-        """Record a public table observation from a Python-owned camera adapter."""
+        """Record a public table observation from a camera bridge."""
+        event_start = len(self._events)
         event = self._append_event(
             EventType.VISION_OBSERVATION,
             source=observation.source,
-            summary="Recorded public table observation for later validation.",
-            payload=observation.model_dump(mode="json"),
+            summary=f"Detected {len(observation.board_cards)} public board card(s).",
+            payload={
+                **observation.model_dump(mode="json"),
+                "expected_card_count": self._state.board_recognition.expected_card_count,
+            },
         )
+        if self.needs_public_board_observation():
+            self._evaluate_public_board_observation(observation)
         return ObservationReceipt(
             accepted=True,
-            reason="Public observations are internal adapter input and are not auto-committed in the skeleton.",
+            reason=f"Recorded public observation; {len(self._events) - event_start} event(s) appended.",
             event=event,
+        )
+
+    def record_public_board_error(self, message: str, *, source: str = "public_board_loop") -> GameEvent:
+        """Record a public board-recognition error without stopping the app."""
+        if self.needs_public_board_observation():
+            self._state.board_recognition = self._state.board_recognition.model_copy(
+                update={
+                    "status": BoardRecognitionStatus.ERROR,
+                    "last_error": message,
+                    "stable_sample_count": 0,
+                },
+            )
+            self._last_valid_board_candidate = None
+        return self._append_event(
+            EventType.VISION_OBSERVATION,
+            source=source,
+            summary=f"Public board recognition error: {message}",
+            payload={"error": message},
         )
 
     def record_client_private_cards(
@@ -318,6 +372,129 @@ class InMemoryOrchestrator:
             },
         )
 
+    def _evaluate_public_board_observation(self, observation: PublicTableObservation) -> None:
+        expected_count = self._state.board_recognition.expected_card_count
+        if expected_count is None:
+            return
+
+        cards = observation.board_cards
+        validation_error = self._public_board_validation_error(observation, expected_count)
+        if validation_error is not None:
+            self._last_valid_board_candidate = None
+            self._state.board_recognition = self._state.board_recognition.model_copy(
+                update={
+                    "status": BoardRecognitionStatus.DETECTING,
+                    "latest_observation": observation,
+                    "stable_sample_count": 0,
+                    "last_error": validation_error,
+                },
+            )
+            return
+
+        candidate = _board_key(cards)
+        stable_count = 1
+        if candidate == self._last_valid_board_candidate:
+            stable_count = self._state.board_recognition.stable_sample_count + 1
+        self._last_valid_board_candidate = candidate
+        self._state.board_recognition = self._state.board_recognition.model_copy(
+            update={
+                "status": BoardRecognitionStatus.DETECTING,
+                "latest_observation": observation,
+                "stable_sample_count": stable_count,
+                "last_error": None,
+            },
+        )
+
+        if stable_count >= self._defaults.required_stable_board_samples:
+            self._commit_public_board(observation)
+
+    def _public_board_validation_error(self, observation: PublicTableObservation, expected_count: int) -> str | None:
+        cards = observation.board_cards
+        if len(cards) != expected_count:
+            return f"Expected {expected_count} board cards, detected {len(cards)}."
+        if observation.confidence < self._defaults.board_confidence_threshold:
+            return f"Confidence {observation.confidence:.2f} is below {self._defaults.board_confidence_threshold:.2f}."
+        if len(set(_board_key(cards))) != len(cards):
+            return "Detected duplicate board cards."
+        committed = _board_key(self._state.board)
+        candidate_prefix = _board_key(cards[: len(self._state.board)])
+        if committed != candidate_prefix:
+            return "Previously committed board cards changed."
+        return None
+
+    def _commit_public_board(self, observation: PublicTableObservation) -> None:
+        cards = observation.board_cards
+        self._state.board = cards
+        self._state.board_source = observation.source
+        self._state.board_confidence = observation.confidence
+        self._state.street = _street_for_board_count(len(cards))
+        self._last_valid_board_candidate = None
+        self._append_event(
+            EventType.BOARD_CARDS_COMMITTED,
+            source="orchestrator",
+            summary=f"Committed {self._state.street} board: {_format_board(cards)}.",
+            payload={
+                "board": [card.model_dump(mode="json") for card in cards],
+                "street": self._state.street,
+                "confidence": observation.confidence,
+            },
+        )
+
+        next_expected = {3: 4, 4: 5}.get(len(cards))
+        if next_expected is None:
+            self._state.board_recognition = self._state.board_recognition.model_copy(
+                update={
+                    "status": BoardRecognitionStatus.COMPLETE,
+                    "expected_card_count": None,
+                    "stable_sample_count": 0,
+                    "last_error": None,
+                    "instruction": "Board recognition complete.",
+                },
+            )
+            self._queue_orchestrator_speech("The board is complete. Che, action is on you.", intent="board_complete")
+            self._pause_for_human_action(self._defaults.active_player_seat)
+            return
+
+        self._request_public_board_cards(next_expected)
+
+    def _request_public_board_cards(self, expected_count: int) -> None:
+        stage_name = _stage_name_for_count(expected_count)
+        self._state.waiting_for = PendingInput(
+            type=PendingInputType.PUBLIC_BOARD_CARDS,
+            reason=f"Waiting for a stable {stage_name} board observation.",
+        )
+        self._state.automation_status = "waiting_for_external_input"
+        self._state.legal_actions = []
+        self._state.board_recognition = BoardRecognitionSnapshot(
+            status=BoardRecognitionStatus.WAITING,
+            expected_card_count=expected_count,
+            latest_observation=self._state.board_recognition.latest_observation,
+            required_stable_samples=self._defaults.required_stable_board_samples,
+            confidence_threshold=self._defaults.board_confidence_threshold,
+            instruction=_instruction_for_count(expected_count),
+        )
+        self._append_event(
+            EventType.ENGINE_PAUSED,
+            source="orchestrator",
+            summary=f"Engine paused for {stage_name} board recognition.",
+            payload=self._state.waiting_for.model_dump(mode="json"),
+        )
+        self._queue_orchestrator_speech(_speech_for_count(expected_count), intent=f"request_{stage_name}")
+
+    def _queue_orchestrator_speech(self, speech: str, *, intent: str) -> None:
+        self._append_event(
+            EventType.PRESENTATION_COMMAND,
+            source="orchestrator",
+            summary="Queued orchestrator speech.",
+            payload={
+                "target_client": ClientId.DASHBOARD,
+                "voice": "orchestrator",
+                "intent": intent,
+                "speech": speech,
+                "priority": "normal",
+            },
+        )
+
     def _pause_for_human_action(self, seat: int) -> None:
         self._state.waiting_for = PendingInput(
             type=PendingInputType.HUMAN_ACTION,
@@ -448,6 +625,10 @@ class InMemoryOrchestrator:
             legal_actions=[],
             automation_status="stopped",
             waiting_for=None,
+            board_recognition=BoardRecognitionSnapshot(
+                confidence_threshold=defaults.board_confidence_threshold,
+                required_stable_samples=defaults.required_stable_board_samples,
+            ),
             uncertainties=[
                 "Rules engine is still a deterministic skeleton.",
                 "Gemma-backed agent decisions are not wired yet.",
@@ -506,6 +687,51 @@ class InMemoryOrchestrator:
             ClientId.PUBLIC_VISION: ClientStatus(
                 client_id=ClientId.PUBLIC_VISION,
                 connection=ClientConnectionState.DISCONNECTED,
-                status="Python table-camera adapter pending",
+                status="browser table-camera bridge pending",
             ),
         }
+
+
+def _board_key(cards: list[Card]) -> tuple[tuple[str, str], ...]:
+    return tuple((str(card.rank), str(card.suit)) for card in cards)
+
+
+def _format_board(cards: list[Card]) -> str:
+    return ", ".join(card.label for card in cards)
+
+
+def _street_for_board_count(card_count: int) -> Street:
+    streets = {
+        0: Street.PREFLOP,
+        3: Street.FLOP,
+        4: Street.TURN,
+        5: Street.RIVER,
+    }
+    return streets[card_count]
+
+
+def _stage_name_for_count(card_count: int) -> str:
+    stages = {
+        3: "flop",
+        4: "turn",
+        5: "river",
+    }
+    return stages[card_count]
+
+
+def _instruction_for_count(card_count: int) -> str:
+    instructions = {
+        3: "Lay out the flop.",
+        4: "Reveal the turn.",
+        5: "Reveal the river.",
+    }
+    return instructions[card_count]
+
+
+def _speech_for_count(card_count: int) -> str:
+    lines = {
+        3: "Please lay out the flop.",
+        4: "Great, reveal the turn.",
+        5: "Great, reveal the river.",
+    }
+    return lines[card_count]

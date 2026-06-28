@@ -31,7 +31,13 @@ Create a local `.env` file for Cerebras access:
 ```shell
 CEREBRAS_API_KEY=your_cerebras_api_key_here
 CEREBRAS_MODEL=gemma-4-31b
+ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
+ELEVENLABS_ORCHESTRATOR_VOICE_ID=your_orchestrator_voice_id_here
+ELEVENLABS_MODEL=eleven_flash_v2_5
+ELEVENLABS_ORCHESTRATOR_SPEED=0.82
 ```
+
+The dashboard uses the browser camera API for public-board frames, so OBS Virtual Camera and other browser-visible devices can be selected directly in the app.
 
 Check model access without starting the web server:
 

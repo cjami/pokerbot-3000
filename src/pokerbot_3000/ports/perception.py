@@ -6,13 +6,14 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from pokerbot_3000.domain.models import PrivateCardObservation, PublicTableObservation
+    from pokerbot_3000.ports.llm import ImageFrame
 
 
 class PublicVisionSource(Protocol):
     """Source of public table observations."""
 
-    async def observe_public_table(self) -> PublicTableObservation:
-        """Capture and interpret the public table."""
+    async def observe_frame(self, frame: ImageFrame) -> PublicTableObservation:
+        """Interpret a public table frame."""
 
 
 class PrivateCardSource(Protocol):

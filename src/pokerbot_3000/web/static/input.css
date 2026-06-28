@@ -24,6 +24,26 @@
     @apply flex min-h-24 flex-wrap items-center gap-3 rounded border border-neutral-200 bg-white p-3;
   }
 
+  .camera-preview {
+    @apply mb-3 aspect-video w-full rounded border border-neutral-200 bg-neutral-100 object-contain;
+  }
+
+  .camera-controls {
+    @apply mb-2 grid gap-2 sm:grid-cols-[1fr_auto];
+  }
+
+  .camera-controls label {
+    @apply grid gap-1 text-xs font-bold uppercase tracking-[0.08em] text-neutral-600;
+  }
+
+  .camera-controls select {
+    @apply rounded border border-neutral-300 bg-white px-3 py-2 text-sm font-bold normal-case tracking-normal text-neutral-800;
+  }
+
+  .camera-status {
+    @apply mb-3 min-h-5 text-sm font-semibold text-neutral-600;
+  }
+
   .control-bar {
     @apply flex items-center gap-2;
   }

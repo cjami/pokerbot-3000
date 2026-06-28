@@ -21,19 +21,19 @@
         <div class="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
           <div class="metric">
             <span class="metric-label">Hand</span>
-            <strong>{{ state.hand_id }}</strong>
+            <strong data-hand-id>{{ state.hand_id }}</strong>
           </div>
           <div class="metric">
             <span class="metric-label">Street</span>
-            <strong>{{ state.street }}</strong>
+            <strong data-street>{{ state.street }}</strong>
           </div>
           <div class="metric">
             <span class="metric-label">Pot</span>
-            <strong>{{ state.pot }}</strong>
+            <strong data-pot>{{ state.pot }}</strong>
           </div>
           <div class="metric">
             <span class="metric-label">Waiting</span>
-            <strong>{{ state.waiting_for.type if state.waiting_for else "none" }}</strong>
+            <strong data-waiting>{{ state.waiting_for.type if state.waiting_for else "none" }}</strong>
           </div>
         </div>
       </header>
@@ -44,7 +44,7 @@
             <h2>Table State</h2>
             <span data-api-status class="status-pill">API pending</span>
           </div>
-          <div class="grid gap-3 md:grid-cols-3">
+          <div class="grid gap-3 md:grid-cols-3" data-seat-grid>
             {% for seat, player in players %}
               <article class="seat-panel{% if seat == state.active_player_seat %} seat-panel-active{% endif %}">
                 <div class="flex items-start justify-between gap-3">
@@ -78,9 +78,9 @@
         <aside class="panel">
           <div class="panel-heading">
             <h2>Board</h2>
-            <span class="status-pill">{{ state.board_source }}</span>
+            <span class="status-pill" data-board-source>{{ state.board_source }}</span>
           </div>
-          <div class="card-row">
+          <div class="card-row" data-board-row>
             {% if state.board %}
               {% for card in state.board %}
                 <span class="playing-card">{{ card.label }}</span>
@@ -92,25 +92,23 @@
           <dl class="mt-4 grid gap-2 text-sm">
             <div class="row-stat">
               <dt>Engine</dt>
-              <dd>{{ state.automation_status }}</dd>
+              <dd data-engine-status>{{ state.automation_status }}</dd>
             </div>
             <div class="row-stat">
               <dt>Active seat</dt>
-              <dd>S{{ state.active_player_seat }}</dd>
+              <dd data-active-seat>S{{ state.active_player_seat }}</dd>
             </div>
-            {% if state.waiting_for %}
-              <div class="row-stat">
-                <dt>Paused for</dt>
-                <dd>{{ state.waiting_for.reason }}</dd>
-              </div>
-            {% endif %}
+            <div class="row-stat">
+              <dt>Paused for</dt>
+              <dd data-waiting-reason>{{ state.waiting_for.reason if state.waiting_for else "none" }}</dd>
+            </div>
             <div class="row-stat">
               <dt>To call</dt>
-              <dd>{{ state.current_bet_to_call }}</dd>
+              <dd data-to-call>{{ state.current_bet_to_call }}</dd>
             </div>
             <div class="row-stat">
               <dt>Min raise</dt>
-              <dd>{{ state.min_raise_to }}</dd>
+              <dd data-min-raise>{{ state.min_raise_to }}</dd>
             </div>
           </dl>
         </aside>
@@ -119,9 +117,61 @@
       <section class="grid gap-4 lg:grid-cols-3">
         <div class="panel">
           <div class="panel-heading">
+            <h2>Public Recognition</h2>
+            <span class="status-pill" data-recognition-status>{{ state.board_recognition.status }}</span>
+          </div>
+          <form class="camera-controls" data-camera-form>
+            <label>
+              <span>Camera</span>
+              <select data-camera-device>
+                <option value="">Default camera</option>
+              </select>
+            </label>
+            <button class="control-button" type="submit">Use</button>
+          </form>
+          <p class="camera-status" data-camera-status>Camera idle</p>
+          <video
+            class="camera-preview"
+            data-public-camera-preview
+            autoplay
+            muted
+            playsinline
+            hidden
+          ></video>
+          <div class="card-row" data-detected-board>
+            {% if state.board_recognition.latest_observation and state.board_recognition.latest_observation.board_cards %}
+              {% for card in state.board_recognition.latest_observation.board_cards %}
+                <span class="playing-card">{{ card.label }}</span>
+              {% endfor %}
+            {% else %}
+              <span class="empty-state">No detection yet</span>
+            {% endif %}
+          </div>
+          <dl class="mt-4 grid gap-2 text-sm">
+            <div class="row-stat">
+              <dt>Expected</dt>
+              <dd data-recognition-expected>{{ state.board_recognition.expected_card_count or "none" }}</dd>
+            </div>
+            <div class="row-stat">
+              <dt>Stable</dt>
+              <dd data-recognition-stable>{{ state.board_recognition.stable_sample_count }}/{{ state.board_recognition.required_stable_samples }}</dd>
+            </div>
+            <div class="row-stat">
+              <dt>Confidence</dt>
+              <dd data-recognition-confidence>{{ "%.0f"|format((state.board_recognition.latest_observation.confidence if state.board_recognition.latest_observation else 0) * 100) }}%</dd>
+            </div>
+            <div class="row-stat">
+              <dt>Issue</dt>
+              <dd data-recognition-error>{{ state.board_recognition.last_error or "none" }}</dd>
+            </div>
+          </dl>
+        </div>
+
+        <div class="panel">
+          <div class="panel-heading">
             <h2>Private Recognition</h2>
           </div>
-          <div class="space-y-3">
+          <div class="space-y-3" data-private-recognition>
             {% for private_state in private_states %}
               <div class="status-row">
                 <div>
@@ -138,7 +188,7 @@
           <div class="panel-heading">
             <h2>Clients</h2>
           </div>
-          <div class="space-y-3">
+          <div class="space-y-3" data-clients>
             {% for client in client_statuses %}
               <div class="status-row">
                 <div>
@@ -155,14 +205,14 @@
           <div class="panel-heading">
             <h2>Legal Actions</h2>
           </div>
-          <div class="flex flex-wrap gap-2">
+          <div class="flex flex-wrap gap-2" data-legal-actions>
             {% for action in state.legal_actions %}
               <span class="action-chip">{{ action }}</span>
             {% endfor %}
           </div>
           <div class="mt-4 border-t border-neutral-200 pt-4">
             <p class="text-sm font-bold text-neutral-700">Known gaps</p>
-            <ul class="mt-2 space-y-1 text-sm text-neutral-600">
+            <ul class="mt-2 space-y-1 text-sm text-neutral-600" data-uncertainties>
               {% for uncertainty in state.uncertainties %}
                 <li>{{ uncertainty }}</li>
               {% endfor %}
