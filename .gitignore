@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.python-version.local
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.ty_cache/
+.mypy_cache/
+.pyright/
+.coverage
+htmlcov/
+node_modules/
+
+# Build artifacts
+/build/
+/dist/
+*.egg-info/
+.eggs/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+outline.md
+
+# Editor and OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Runtime outputs
+outputs/
+tmp/
+*.log

@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ app_name }}</title>
+    <link rel="stylesheet" href="{{ request.url_for('static', path='styles.css') }}">
+    <script type="module" src="{{ request.url_for('static', path='app.js') }}"></script>
+  </head>
+  <body class="min-h-screen text-ink antialiased">
+    <main class="mx-auto grid min-h-screen w-full max-w-6xl content-center gap-8 px-6 py-10 md:grid-cols-[1.2fr_0.8fr]">
+      <section class="space-y-6">
+        <p class="text-sm font-semibold uppercase tracking-[0.18em] text-felt">Hackathon scaffold</p>
+        <div class="space-y-4">
+          <h1 class="max-w-3xl text-5xl font-black leading-tight sm:text-6xl">{{ app_name }}</h1>
+          <p class="max-w-2xl text-lg leading-8 text-neutral-700">
+            A starter control surface for a poker table orchestrator: table state, perception, voice commands,
+            software agents, and robot reactions will meet here.
+          </p>
+        </div>
+        <div class="flex flex-wrap gap-3 text-sm font-semibold">
+          <span class="rounded border border-neutral-300 bg-white/70 px-3 py-2">FastAPI</span>
+          <span class="rounded border border-neutral-300 bg-white/70 px-3 py-2">Jinja</span>
+          <span class="rounded border border-neutral-300 bg-white/70 px-3 py-2">Tailwind CSS</span>
+          <span class="rounded border border-neutral-300 bg-white/70 px-3 py-2">esbuild</span>
+        </div>
+      </section>
+
+      <section class="rounded-lg border border-neutral-300 bg-white/75 p-5 shadow-sm">
+        <h2 class="text-base font-bold uppercase tracking-[0.12em] text-neutral-600">Starter lanes</h2>
+        <div class="mt-4 grid gap-3">
+          <div data-status-item class="rounded border border-neutral-200 bg-white p-4">
+            <p class="font-bold">Game orchestrator</p>
+            <p class="mt-1 text-sm text-neutral-600">Canonical state and action validation will land here first.</p>
+          </div>
+          <div data-status-item class="rounded border border-neutral-200 bg-white p-4">
+            <p class="font-bold">Perception and voice</p>
+            <p class="mt-1 text-sm text-neutral-600">Future services can emit structured observations and actions.</p>
+          </div>
+          <div data-status-item class="rounded border border-neutral-200 bg-white p-4">
+            <p class="font-bold">Live table UI</p>
+            <p class="mt-1 text-sm text-neutral-600">This page is the first thin slice of the operator surface.</p>
+          </div>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

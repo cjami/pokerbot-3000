@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pokerbot-3000"
+version = "0.1.0"
+description = "A starter scaffold for a poker table orchestrator."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "jinja2",
+    "pydantic",
+    "python-dotenv",
+    "uvicorn[standard]",
+]
+
+[project.scripts]
+pokerbot-3000 = "pokerbot_3000.cli:main"
+
+[dependency-groups]
+dev = [
+    "httpx",
+    "pre-commit",
+    "pytest",
+    "ruff",
+    "ty",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812", # Let Ruff format manage trailing commas to avoid formatter/linter churn.
+    "CPY001", # Do not require copyright headers in this small application.
+    "D203", # Prefer no blank line before class docstrings; this conflicts with D211.
+    "D213", # Prefer multi-line docstring summaries on the first line; this conflicts with D212.
+    "ISC001", # Let Ruff format manage implicit string concatenation spacing.
+    "T201", # CLI entry points should be allowed to print user-facing output.
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "ANN001", # Pytest fixture annotations add noise to small tests.
+    "ANN201", # Test functions do not need return annotations when they only assert behavior.
+    "D100", # Test modules can be named clearly without module docstrings.
+    "D103", # Test function names describe behavior without extra docstrings.
+    "PLR2004", # Literal expected values keep small tests readable.
+    "S101", # Pytest assertions are the standard test assertion style.
+]

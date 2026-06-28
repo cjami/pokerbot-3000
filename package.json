@@ -1,0 +1,14 @@
+{
+  "name": "pokerbot-3000",
+  "private": true,
+  "scripts": {
+    "assets": "npm run assets:css && npm run assets:js",
+    "assets:css": "tailwindcss -i src/pokerbot_3000/web/static/input.css -o build/web/static/styles.css --minify",
+    "assets:js": "esbuild src/pokerbot_3000/web/static/app.js --bundle --minify --format=esm --outfile=build/web/static/app.js"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4",
+    "esbuild": "^0.28.1",
+    "tailwindcss": "^4"
+  }
+}
