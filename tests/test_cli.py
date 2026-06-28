@@ -35,6 +35,22 @@ def test_cli_launches_uvicorn_without_browser(monkeypatch):
     }
 
 
+def test_cli_check_llm_does_not_launch_server(monkeypatch, capsys):
+    async def fake_check_llm() -> None:
+        print("Cerebras access OK for gemma-4-31b: pokerbot-ok")
+
+    def fake_run(_app: str, **_kwargs: object) -> None:
+        msg = "Server should not start during an LLM check."
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(cli, "_check_llm", fake_check_llm)
+    monkeypatch.setattr(cli.uvicorn, "run", fake_run)
+
+    cli.main(["--check-llm"])
+
+    assert "Cerebras access OK" in capsys.readouterr().out
+
+
 def test_cli_opens_browser_by_default(monkeypatch):
     captured: dict[str, object] = {}
 

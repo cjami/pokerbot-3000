@@ -26,6 +26,19 @@ The local app defaults to `http://127.0.0.1:8000/`.
 
 ## Development
 
+Create a local `.env` file for Cerebras access:
+
+```shell
+CEREBRAS_API_KEY=your_cerebras_api_key_here
+CEREBRAS_MODEL=gemma-4-31b
+```
+
+Check model access without starting the web server:
+
+```shell
+uv run pokerbot-3000 --check-llm
+```
+
 ```shell
 make setup
 make assets

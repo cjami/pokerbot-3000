@@ -44,7 +44,7 @@ class LlmGateway(Protocol):
         """Read labelled public table state from a frame."""
 
     async def read_board_cards(self, frame_or_crop: ImageFrame) -> list[Card]:
-        """Read compact card notation from the public board zone."""
+        """Read visible cards from the public board zone."""
 
     async def read_hole_cards(self, agent_id: str, frame: ImageFrame) -> PrivateCardObservation:
         """Read private hole cards for one agent."""

@@ -83,7 +83,7 @@
           <div class="card-row">
             {% if state.board %}
               {% for card in state.board %}
-                <span class="playing-card">{{ card }}</span>
+                <span class="playing-card">{{ card.label }}</span>
               {% endfor %}
             {% else %}
               <span class="empty-state">No board cards recognised</span>

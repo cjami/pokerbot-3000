@@ -1,10 +1,48 @@
-"""Card notation helpers."""
+"""Playing card models."""
 
 from __future__ import annotations
 
-from typing import Annotated
+from enum import StrEnum
 
-from pydantic import StringConstraints
+from pydantic import BaseModel, ConfigDict
 
-CARD_PATTERN = r"^[AKQJT98765432][shdc]$"
-type Card = Annotated[str, StringConstraints(pattern=CARD_PATTERN)]
+
+class CardRank(StrEnum):
+    """Canonical card ranks."""
+
+    ACE = "ace"
+    KING = "king"
+    QUEEN = "queen"
+    JACK = "jack"
+    TEN = "10"
+    NINE = "9"
+    EIGHT = "8"
+    SEVEN = "7"
+    SIX = "6"
+    FIVE = "5"
+    FOUR = "4"
+    THREE = "3"
+    TWO = "2"
+
+
+class CardSuit(StrEnum):
+    """Canonical card suits."""
+
+    SPADES = "spades"
+    HEARTS = "hearts"
+    DIAMONDS = "diamonds"
+    CLUBS = "clubs"
+
+
+class Card(BaseModel):
+    """A friendly structured playing card."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=True)
+
+    rank: CardRank
+    suit: CardSuit
+
+    @property
+    def label(self) -> str:
+        """Return a human display label."""
+        return f"{str(self.rank).title()} of {str(self.suit).title()}"

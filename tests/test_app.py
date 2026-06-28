@@ -102,7 +102,10 @@ def test_api_thin_client_private_cards_trigger_internal_agent_turn():
         json={
             "agent_id": "eliza",
             "seat": 3,
-            "hole_cards": ["9c", "9d"],
+            "hole_cards": [
+                {"rank": "9", "suit": "clubs"},
+                {"rank": "9", "suit": "diamonds"},
+            ],
             "source": "eliza_browser_webcam",
             "confidence": 0.89,
         },

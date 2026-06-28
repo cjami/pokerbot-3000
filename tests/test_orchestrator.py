@@ -1,5 +1,6 @@
 import pytest
 
+from pokerbot_3000.domain.cards import Card
 from pokerbot_3000.domain.models import HumanActionInput, PrivateCardObservation, PublicTableObservation, Street
 from pokerbot_3000.orchestrator import InMemoryOrchestrator
 
@@ -61,7 +62,11 @@ def test_orchestrator_records_public_observation_as_event_only():
     orchestrator = InMemoryOrchestrator()
     observation = PublicTableObservation(
         dealer_seat=1,
-        board_cards=["Ah", "7d", "2c"],
+        board_cards=[
+            _card("ace", "hearts"),
+            _card("7", "diamonds"),
+            _card("2", "clubs"),
+        ],
         street_hint=Street.FLOP,
         pot_has_chips=True,
         confidence=0.84,
@@ -83,7 +88,10 @@ def test_orchestrator_runs_agent_internally_after_thin_client_cards():
     observation = PrivateCardObservation(
         agent_id="eliza",
         seat=3,
-        hole_cards=["9c", "9d"],
+        hole_cards=[
+            _card("9", "clubs"),
+            _card("9", "diamonds"),
+        ],
         source="eliza_browser_webcam",
         confidence=0.91,
     )
@@ -96,7 +104,10 @@ def test_orchestrator_runs_agent_internally_after_thin_client_cards():
     assert result.state.pot == 200
     assert result.state.waiting_for is not None
     assert result.state.waiting_for.agent_id == "reachy"
-    assert private_states["eliza"].hole_cards == ["9c", "9d"]
+    assert [card.model_dump() for card in private_states["eliza"].hole_cards] == [
+        {"rank": "9", "suit": "clubs"},
+        {"rank": "9", "suit": "diamonds"},
+    ]
     assert "hole_cards" not in str(public_payload)
     assert "agent_decision" in {event.event_type for event in result.events}
 
@@ -110,9 +121,16 @@ def test_orchestrator_rejects_mismatched_private_agent_path():
     observation = PrivateCardObservation(
         agent_id="eliza",
         seat=3,
-        hole_cards=["9c", "9d"],
+        hole_cards=[
+            _card("9", "clubs"),
+            _card("9", "diamonds"),
+        ],
         source="eliza_browser_webcam",
     )
 
     with pytest.raises(ValueError, match="does not match"):
         orchestrator.record_client_private_cards("reachy", observation)
+
+
+def _card(rank: str, suit: str) -> Card:
+    return Card.model_validate({"rank": rank, "suit": suit})

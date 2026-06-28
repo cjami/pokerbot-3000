@@ -163,7 +163,7 @@ class PublicGameState(PokerBaseModel):
 
     @field_validator("board")
     @classmethod
-    def validate_board_progression(cls, board: list[str]) -> list[str]:
+    def validate_board_progression(cls, board: list[Card]) -> list[Card]:
         """Keep board-card counts aligned with Hold'em streets."""
         if len(board) in {1, 2}:
             msg = "Board must have 0, 3, 4, or 5 cards."
