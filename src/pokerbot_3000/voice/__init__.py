@@ -21,6 +21,8 @@ from pokerbot_3000.voice.capture import (
 from pokerbot_3000.voice.coordinator import VoiceActionAdapters, VoiceActionCoordinator, VoiceInputStatus
 from pokerbot_3000.voice.elevenlabs import (
     ELEVENLABS_API_KEY_ENV,
+    ELEVENLABS_ELIZA_SPEED_ENV,
+    ELEVENLABS_ELIZA_VOICE_ID_ENV,
     ELEVENLABS_MODEL_ENV,
     ELEVENLABS_ORCHESTRATOR_SPEED_ENV,
     ELEVENLABS_ORCHESTRATOR_VOICE_ID_ENV,
@@ -34,6 +36,8 @@ from pokerbot_3000.voice.grammar import DeterministicVoiceCommandParser
 __all__ = [
     "DEFAULT_PARAKEET_MODEL",
     "ELEVENLABS_API_KEY_ENV",
+    "ELEVENLABS_ELIZA_SPEED_ENV",
+    "ELEVENLABS_ELIZA_VOICE_ID_ENV",
     "ELEVENLABS_MODEL_ENV",
     "ELEVENLABS_ORCHESTRATOR_SPEED_ENV",
     "ELEVENLABS_ORCHESTRATOR_VOICE_ID_ENV",

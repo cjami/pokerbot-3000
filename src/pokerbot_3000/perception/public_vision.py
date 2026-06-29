@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from pokerbot_3000.domain.cards import Card
+    from pokerbot_3000.domain.models import PrivateCardObservation
     from pokerbot_3000.ports.llm import ImageFrame, LlmGateway
 
 BOARD_CARD_READER_CONFIDENCE: Final = 0.86
@@ -67,6 +68,39 @@ class LazyGemmaPublicVisionSource:
                 llm=CerebrasLlmClient(CerebrasConfig.from_env(self._env_file)),
             )
         return await self._source.observe_frame(frame)
+
+    def _ensure_env_loaded(self) -> None:
+        load_dotenv(dotenv_path=self._env_file)
+
+
+class GemmaPrivateCardSource:
+    """Private-card source that asks Gemma to read a submitted client frame."""
+
+    def __init__(self, llm: LlmGateway) -> None:
+        """Create a source from a task-level LLM gateway."""
+        self._llm = llm
+
+    async def read_private_cards(self, agent_id: str, frame: ImageFrame) -> PrivateCardObservation:
+        """Interpret one submitted private-card frame."""
+        return await self._llm.read_hole_cards(agent_id, frame)
+
+
+class LazyGemmaPrivateCardSource:
+    """Lazily create the Gemma client on first private-card frame."""
+
+    def __init__(self, env_file: str | Path | None = None) -> None:
+        """Delay configuration loading until a thin client submits a frame."""
+        self._env_file = env_file
+        self._source: GemmaPrivateCardSource | None = None
+
+    async def read_private_cards(self, agent_id: str, frame: ImageFrame) -> PrivateCardObservation:
+        """Interpret a client-submitted private-card frame using lazily initialized dependencies."""
+        if self._source is None:
+            self._ensure_env_loaded()
+            self._source = GemmaPrivateCardSource(
+                llm=CerebrasLlmClient(CerebrasConfig.from_env(self._env_file)),
+            )
+        return await self._source.read_private_cards(agent_id, frame)
 
     def _ensure_env_loaded(self) -> None:
         load_dotenv(dotenv_path=self._env_file)

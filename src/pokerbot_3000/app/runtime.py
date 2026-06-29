@@ -10,9 +10,13 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from pokerbot_3000.domain.models import EventType, ExternalInputResult
+from pokerbot_3000.domain.models import ClientId, EventType, ExternalInputResult
 from pokerbot_3000.orchestrator import InMemoryOrchestrator
-from pokerbot_3000.perception import LazyGemmaPublicVisionSource, LazyGemmaRevealedCardsSource
+from pokerbot_3000.perception import (
+    LazyGemmaPrivateCardSource,
+    LazyGemmaPublicVisionSource,
+    LazyGemmaRevealedCardsSource,
+)
 from pokerbot_3000.voice import (
     BrowserAudioInput,
     DeterministicVoiceCommandParser,
@@ -29,7 +33,7 @@ from pokerbot_3000.voice import (
 if TYPE_CHECKING:
     from pokerbot_3000.domain.models import GameEvent, OperatorControlResult
     from pokerbot_3000.ports.llm import ImageFrame
-    from pokerbot_3000.ports.perception import PublicVisionSource, RevealedCardsSource
+    from pokerbot_3000.ports.perception import PrivateCardSource, PublicVisionSource, RevealedCardsSource
     from pokerbot_3000.voice.coordinator import VoiceActionCoordinator as VoiceActionCoordinatorType
 
 type DashboardMessage = dict[str, Any]
@@ -43,6 +47,9 @@ class SpeechSynthesisClient(Protocol):
     async def synthesize_orchestrator(self, text: str) -> bytes:
         """Synthesize orchestrator speech."""
 
+    async def synthesize_eliza(self, text: str) -> bytes:
+        """Synthesize Eliza speech."""
+
 
 type VoiceClientFactory = Callable[[], SpeechSynthesisClient]
 
@@ -55,15 +62,17 @@ class DashboardEventBroadcaster:
         self._snapshot_factory = snapshot_factory
         self._subscribers: set[asyncio.Queue[DashboardMessage]] = set()
 
-    async def websocket_endpoint(self, websocket: WebSocket) -> None:
+    async def websocket_endpoint(self, websocket: WebSocket, snapshot_factory: SnapshotFactory | None = None) -> None:
         """Serve one dashboard WebSocket connection."""
+        current_snapshot = snapshot_factory or self._snapshot_factory
         await websocket.accept()
         queue: asyncio.Queue[DashboardMessage] = asyncio.Queue(maxsize=10)
         self._subscribers.add(queue)
         try:
-            await websocket.send_json(self._snapshot_factory())
+            await websocket.send_json(current_snapshot())
             while True:
-                await websocket.send_json(await queue.get())
+                message = await queue.get()
+                await websocket.send_json(current_snapshot() if snapshot_factory is not None else message)
         except WebSocketDisconnect:
             return
         finally:
@@ -191,6 +200,45 @@ class RevealedCardsFrameProcessor:
             return result
 
 
+class PrivateCardsFrameProcessor:
+    """Process thin-client private-card frames."""
+
+    def __init__(
+        self,
+        orchestrator: InMemoryOrchestrator,
+        private_cards: PrivateCardSource,
+        broadcaster: DashboardEventBroadcaster,
+        *,
+        after_events: EventHook | None = None,
+    ) -> None:
+        """Create a frame processor around a private-card source and orchestrator."""
+        self._orchestrator = orchestrator
+        self._private_cards = private_cards
+        self._broadcaster = broadcaster
+        self._after_events = after_events
+        self._lock = asyncio.Lock()
+
+    async def process_frame(self, agent_id: str, frame: ImageFrame) -> ExternalInputResult:
+        """Ask Gemma to read a private-card frame and advance the agent turn."""
+        async with self._lock:
+            event_start = self._orchestrator.event_count()
+            try:
+                observation = await self._private_cards.read_private_cards(agent_id, frame)
+                result = self._orchestrator.record_client_private_cards(agent_id, observation)
+            except Exception as exc:  # noqa: BLE001
+                result = ExternalInputResult(
+                    accepted=False,
+                    reason=_public_error_message(exc),
+                    events=self._orchestrator.events_since(event_start),
+                    state=self._orchestrator.public_state(),
+                )
+
+            if self._after_events is not None:
+                await self._after_events(result.events)
+            await self._broadcaster.publish_snapshot()
+            return result
+
+
 def _default_voice_client_factory() -> ElevenLabsClient:
     return ElevenLabsClient(ElevenLabsConfig.from_env())
 
@@ -202,6 +250,7 @@ class DashboardRuntime:
     orchestrator: InMemoryOrchestrator
     broadcaster: DashboardEventBroadcaster
     board_processor: PublicBoardFrameProcessor
+    private_cards_processor: PrivateCardsFrameProcessor
     revealed_cards_processor: RevealedCardsFrameProcessor
     voice_coordinator: VoiceActionCoordinatorType | None = None
     browser_voice_input: BrowserAudioInput | None = None
@@ -229,6 +278,12 @@ class DashboardRuntime:
             broadcaster=broadcaster,
             after_events=handle_events,
         )
+        private_cards_processor = PrivateCardsFrameProcessor(
+            orchestrator=orchestrator,
+            private_cards=LazyGemmaPrivateCardSource(),
+            broadcaster=broadcaster,
+            after_events=handle_events,
+        )
         revealed_cards_processor = RevealedCardsFrameProcessor(
             orchestrator=orchestrator,
             revealed_cards=LazyGemmaRevealedCardsSource(),
@@ -251,6 +306,7 @@ class DashboardRuntime:
             orchestrator=orchestrator,
             broadcaster=broadcaster,
             board_processor=board_processor,
+            private_cards_processor=private_cards_processor,
             revealed_cards_processor=revealed_cards_processor,
             voice_coordinator=voice_coordinator,
             browser_voice_input=browser_voice_input,
@@ -296,6 +352,25 @@ class DashboardRuntime:
             "voice_input": self.voice_status(),
         }
 
+    def client_snapshot(self, client_id: ClientId) -> DashboardMessage:
+        """Return a private-data-scoped snapshot for a thin client."""
+        agent_id = client_id.value if client_id in {ClientId.ELIZA, ClientId.REACHY} else None
+        return {
+            "type": "snapshot",
+            "client_id": client_id.value,
+            "state": self.orchestrator.public_state().model_dump(mode="json"),
+            "events": [event.model_dump(mode="json") for event in self.orchestrator.events(limit=25)],
+            "private_states": [
+                state.model_dump(mode="json")
+                for state in self.orchestrator.private_states().values()
+                if state.agent_id == agent_id
+            ],
+            "client_statuses": [
+                status.model_dump(mode="json") for status in self.orchestrator.client_statuses().values()
+            ],
+            "voice_input": self.voice_status(),
+        }
+
     def voice_status(self) -> dict[str, Any]:
         """Return the public server-side voice worker status."""
         if self.voice_coordinator is None:
@@ -330,6 +405,10 @@ class DashboardRuntime:
         """Process one browser-submitted public-board frame."""
         return await self.board_processor.process_frame(frame)
 
+    async def process_private_cards_frame(self, agent_id: str, frame: ImageFrame) -> ExternalInputResult:
+        """Process one thin-client private-card frame."""
+        return await self.private_cards_processor.process_frame(agent_id, frame)
+
     async def process_revealed_cards_frame(self, seat: int, frame: ImageFrame) -> ExternalInputResult:
         """Process one browser-submitted revealed-card frame."""
         return await self.revealed_cards_processor.process_frame(seat, frame)
@@ -342,36 +421,62 @@ class DashboardRuntime:
 
     async def synthesize_orchestrator_event(self, event_id: str) -> bytes:
         """Return MPEG audio for one queued orchestrator speech event."""
-        if event_id in self._audio_cache:
-            return self._audio_cache[event_id]
+        cache_key = _audio_cache_key("orchestrator", event_id)
+        if cache_key in self._audio_cache:
+            return self._audio_cache[cache_key]
         task = self._queue_orchestrator_synthesis(event_id)
         if task is None:
-            return self._audio_cache[event_id]
+            return self._audio_cache[cache_key]
+        return await task
+
+    async def synthesize_eliza_event(self, event_id: str) -> bytes:
+        """Return MPEG audio for one queued Eliza speech event."""
+        cache_key = _audio_cache_key("eliza", event_id)
+        if cache_key in self._audio_cache:
+            return self._audio_cache[cache_key]
+        task = self._queue_eliza_synthesis(event_id)
+        if task is None:
+            return self._audio_cache[cache_key]
         return await task
 
     def _queue_orchestrator_synthesis(self, event_id: str) -> asyncio.Task[bytes] | None:
         """Start synthesis for a speech event unless audio is already ready."""
-        if event_id in self._audio_cache:
+        cache_key = _audio_cache_key("orchestrator", event_id)
+        if cache_key in self._audio_cache:
             return None
-        if event_id in self._audio_tasks:
-            return self._audio_tasks[event_id]
+        if cache_key in self._audio_tasks:
+            return self._audio_tasks[cache_key]
 
         task = asyncio.create_task(self._synthesize_orchestrator_event(event_id))
-        self._audio_tasks[event_id] = task
-        task.add_done_callback(lambda completed: self._finalize_audio_task(event_id, completed))
+        self._audio_tasks[cache_key] = task
+        task.add_done_callback(lambda completed: self._finalize_audio_task(cache_key, completed))
         return task
 
-    def _finalize_audio_task(self, event_id: str, task: asyncio.Task[bytes]) -> None:
+    def _queue_eliza_synthesis(self, event_id: str) -> asyncio.Task[bytes] | None:
+        """Start Eliza speech synthesis unless audio is already ready."""
+        cache_key = _audio_cache_key("eliza", event_id)
+        if cache_key in self._audio_cache:
+            return None
+        if cache_key in self._audio_tasks:
+            return self._audio_tasks[cache_key]
+
+        task = asyncio.create_task(self._synthesize_eliza_event(event_id))
+        self._audio_tasks[cache_key] = task
+        task.add_done_callback(lambda completed: self._finalize_audio_task(cache_key, completed))
+        return task
+
+    def _finalize_audio_task(self, cache_key: str, task: asyncio.Task[bytes]) -> None:
         """Forget completed synthesis tasks while keeping successful audio cached."""
-        if self._audio_tasks.get(event_id) is task:
-            self._audio_tasks.pop(event_id, None)
+        if self._audio_tasks.get(cache_key) is task:
+            self._audio_tasks.pop(cache_key, None)
         with suppress(asyncio.CancelledError, Exception):
             task.result()
 
     async def _synthesize_orchestrator_event(self, event_id: str) -> bytes:
         """Synthesize and cache one orchestrator speech event."""
-        if event_id in self._audio_cache:
-            return self._audio_cache[event_id]
+        cache_key = _audio_cache_key("orchestrator", event_id)
+        if cache_key in self._audio_cache:
+            return self._audio_cache[cache_key]
 
         event = self.orchestrator.event_by_id(event_id)
         if event is None or event.event_type != EventType.PRESENTATION_COMMAND:
@@ -387,7 +492,30 @@ class DashboardRuntime:
         if self._voice_client is None:
             self._voice_client = self.voice_client_factory()
         audio = await self._voice_client.synthesize_orchestrator(speech)
-        self._audio_cache[event_id] = audio
+        self._audio_cache[cache_key] = audio
+        return audio
+
+    async def _synthesize_eliza_event(self, event_id: str) -> bytes:
+        """Synthesize and cache one Eliza speech event."""
+        cache_key = _audio_cache_key("eliza", event_id)
+        if cache_key in self._audio_cache:
+            return self._audio_cache[cache_key]
+
+        event = self.orchestrator.event_by_id(event_id)
+        if event is None or event.event_type != EventType.PRESENTATION_COMMAND:
+            msg = "Unknown Eliza speech event."
+            raise ElevenLabsClientError(msg)
+
+        speech = event.payload.get("speech")
+        target_client = event.payload.get("target_client")
+        if not isinstance(speech, str) or str(target_client) != ClientId.ELIZA:
+            msg = "Event does not contain Eliza speech."
+            raise ElevenLabsClientError(msg)
+
+        if self._voice_client is None:
+            self._voice_client = self.voice_client_factory()
+        audio = await self._voice_client.synthesize_eliza(speech)
+        self._audio_cache[cache_key] = audio
         return audio
 
 
@@ -401,3 +529,7 @@ def _is_orchestrator_speech_event(event: GameEvent) -> bool:
         and event.payload.get("voice") == "orchestrator"
         and isinstance(event.payload.get("speech"), str)
     )
+
+
+def _audio_cache_key(voice: str, event_id: str) -> str:
+    return f"{voice}:{event_id}"

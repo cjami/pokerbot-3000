@@ -20,8 +20,8 @@ class PublicVisionSource(Protocol):
 class PrivateCardSource(Protocol):
     """Source of private card observations."""
 
-    async def observe_private_cards(self, agent_id: str) -> PrivateCardObservation:
-        """Capture and interpret private cards for one agent."""
+    async def read_private_cards(self, agent_id: str, frame: ImageFrame) -> PrivateCardObservation:
+        """Interpret one private-card frame for one agent."""
 
 
 class RevealedCardsSource(Protocol):

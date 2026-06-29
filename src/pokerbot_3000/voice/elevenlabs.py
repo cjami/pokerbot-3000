@@ -21,10 +21,12 @@ type AudioTransport = Callable[[str, dict[str, object], Mapping[str, str], float
 
 ELEVENLABS_API_KEY_ENV: Final = "ELEVENLABS_API_KEY"
 ELEVENLABS_ORCHESTRATOR_VOICE_ID_ENV: Final = "ELEVENLABS_ORCHESTRATOR_VOICE_ID"
+ELEVENLABS_ELIZA_VOICE_ID_ENV: Final = "ELEVENLABS_ELIZA_VOICE_ID"
 ELEVENLABS_MODEL_ENV: Final = "ELEVENLABS_MODEL"
 ELEVENLABS_BASE_URL_ENV: Final = "ELEVENLABS_BASE_URL"
 ELEVENLABS_TIMEOUT_ENV: Final = "ELEVENLABS_TIMEOUT_SECONDS"
 ELEVENLABS_ORCHESTRATOR_SPEED_ENV: Final = "ELEVENLABS_ORCHESTRATOR_SPEED"
+ELEVENLABS_ELIZA_SPEED_ENV: Final = "ELEVENLABS_ELIZA_SPEED"
 DEFAULT_ELEVENLABS_MODEL: Final = "eleven_flash_v2_5"
 DEFAULT_ELEVENLABS_BASE_URL: Final = "https://api.elevenlabs.io/v1/"
 DEFAULT_OUTPUT_FORMAT: Final = "mp3_44100_128"
@@ -48,11 +50,13 @@ class ElevenLabsConfig:
 
     api_key: str
     orchestrator_voice_id: str
+    eliza_voice_id: str | None = None
     model: str = DEFAULT_ELEVENLABS_MODEL
     base_url: str = DEFAULT_ELEVENLABS_BASE_URL
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     output_format: str = DEFAULT_OUTPUT_FORMAT
     orchestrator_speed: float = DEFAULT_ORCHESTRATOR_SPEED
+    eliza_speed: float = DEFAULT_ORCHESTRATOR_SPEED
 
     @classmethod
     def from_env(cls, env_file: str | Path | None = None) -> ElevenLabsConfig:
@@ -72,10 +76,12 @@ class ElevenLabsConfig:
         return cls(
             api_key=api_key,
             orchestrator_voice_id=voice_id,
+            eliza_voice_id=os.getenv(ELEVENLABS_ELIZA_VOICE_ID_ENV),
             model=os.getenv(ELEVENLABS_MODEL_ENV, DEFAULT_ELEVENLABS_MODEL),
             base_url=_normalized_base_url(os.getenv(ELEVENLABS_BASE_URL_ENV, DEFAULT_ELEVENLABS_BASE_URL)),
             timeout_seconds=_env_float(ELEVENLABS_TIMEOUT_ENV, DEFAULT_TIMEOUT_SECONDS),
             orchestrator_speed=_env_float(ELEVENLABS_ORCHESTRATOR_SPEED_ENV, DEFAULT_ORCHESTRATOR_SPEED),
+            eliza_speed=_env_float(ELEVENLABS_ELIZA_SPEED_ENV, DEFAULT_ORCHESTRATOR_SPEED),
         )
 
 
@@ -89,9 +95,16 @@ class ElevenLabsClient:
 
     async def synthesize_orchestrator(self, text: str) -> bytes:
         """Synthesize orchestrator speech as MPEG audio."""
-        return await self._synthesize(self._config.orchestrator_voice_id, text)
+        return await self._synthesize(self._config.orchestrator_voice_id, text, speed=self._config.orchestrator_speed)
 
-    async def _synthesize(self, voice_id: str, text: str) -> bytes:
+    async def synthesize_eliza(self, text: str) -> bytes:
+        """Synthesize Eliza speech as MPEG audio."""
+        if not self._config.eliza_voice_id:
+            msg = f"Set {ELEVENLABS_ELIZA_VOICE_ID_ENV} in your environment or .env file."
+            raise ElevenLabsConfigurationError(msg)
+        return await self._synthesize(self._config.eliza_voice_id, text, speed=self._config.eliza_speed)
+
+    async def _synthesize(self, voice_id: str, text: str, *, speed: float) -> bytes:
         if not text.strip():
             msg = "Cannot synthesize empty speech."
             raise ElevenLabsClientError(msg)
@@ -110,7 +123,7 @@ class ElevenLabsClient:
             "voice_settings": {
                 "stability": DEFAULT_ORCHESTRATOR_STABILITY,
                 "similarity_boost": DEFAULT_ORCHESTRATOR_SIMILARITY_BOOST,
-                "speed": self._config.orchestrator_speed,
+                "speed": speed,
             },
         }
         return await asyncio.to_thread(self._transport, url, payload, headers, self._config.timeout_seconds)

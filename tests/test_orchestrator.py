@@ -182,6 +182,10 @@ def test_orchestrator_runs_agent_internally_after_thin_client_cards():
     ]
     assert "hole_cards" not in str(public_payload)
     assert "agent_decision" in {event.event_type for event in result.events}
+    presentation = next(event for event in result.events if event.event_type == "presentation_command")
+    assert presentation.payload["target_client"] == "eliza"
+    assert presentation.payload["emotion"] == "calm"
+    assert presentation.payload["gesture"] == "nod"
 
 
 def test_orchestrator_rejects_mismatched_private_agent_path():

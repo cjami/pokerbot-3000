@@ -25,6 +25,8 @@ class AgentTurn:
     action: PokerAction
     speech: str
     reaction: str
+    emotion: str
+    gesture: str
 
 
 class StubPokerAgent:
@@ -47,4 +49,17 @@ class StubPokerAgent:
             action = PokerAction(type=ActionType.FOLD)
             phrase = f"{profile.display_name} folds."
 
-        return AgentTurn(action=action, speech=phrase, reaction="announce_action")
+        emotion, gesture = _presentation_for_action(action.type)
+        return AgentTurn(action=action, speech=phrase, reaction="announce_action", emotion=emotion, gesture=gesture)
+
+
+def _presentation_for_action(action_type: ActionType) -> tuple[str, str]:
+    presentations = {
+        ActionType.CHECK: ("calm", "nod"),
+        ActionType.CALL: ("calm", "nod"),
+        ActionType.BET: ("confident", "lean_in"),
+        ActionType.RAISE_TO: ("confident", "lean_in"),
+        ActionType.ALL_IN: ("celebrate", "big_nod"),
+        ActionType.FOLD: ("sad", "look_down"),
+    }
+    return presentations.get(action_type, ("confused", "tilt"))

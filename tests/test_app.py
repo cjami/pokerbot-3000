@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from pokerbot_3000.app.runtime import (
     DashboardEventBroadcaster,
     DashboardRuntime,
+    PrivateCardsFrameProcessor,
     PublicBoardFrameProcessor,
     RevealedCardsFrameProcessor,
 )
@@ -66,12 +67,36 @@ class StaticRevealedCardsVision:
         return self.cards
 
 
+class StaticPrivateCardsVision:
+    """Private-card fake that returns configured cards."""
+
+    def __init__(self, cards: list[Card] | None = None) -> None:
+        """Initialize the fixed private-card output."""
+        self.cards = cards or [_card("9", "clubs"), _card("9", "diamonds")]
+        self.frames: list[ImageFrame] = []
+
+    async def read_private_cards(self, agent_id: str, frame: ImageFrame) -> PrivateCardObservation:
+        """Return fixed private cards for one client frame."""
+        self.frames.append(frame)
+        return PrivateCardObservation(
+            agent_id=agent_id,
+            seat={"reachy": 2, "eliza": 3}[agent_id],
+            hole_cards=self.cards,
+            source=frame.source,
+            confidence=0.9,
+        )
+
+
 class FakeVoiceClient:
     """Voice fake that returns deterministic bytes."""
 
     async def synthesize_orchestrator(self, text: str) -> bytes:
         """Return fake MPEG bytes for a speech line."""
         return f"audio:{text}".encode()
+
+    async def synthesize_eliza(self, text: str) -> bytes:
+        """Return fake MPEG bytes for an Eliza speech line."""
+        return f"eliza:{text}".encode()
 
 
 class RecordingVoiceClient:
@@ -85,6 +110,11 @@ class RecordingVoiceClient:
         """Record the requested speech and return fake MPEG bytes."""
         self.calls.append(text)
         return f"audio:{text}".encode()
+
+    async def synthesize_eliza(self, text: str) -> bytes:
+        """Record the requested Eliza speech and return fake MPEG bytes."""
+        self.calls.append(f"eliza:{text}")
+        return f"eliza:{text}".encode()
 
 
 def build_test_runtime(public_vision: PublicVisionSource | None = None) -> DashboardRuntime:
@@ -100,6 +130,11 @@ def build_test_runtime(public_vision: PublicVisionSource | None = None) -> Dashb
         public_vision=public_vision or NoopPublicVision(),
         broadcaster=broadcaster,
     )
+    private_processor = PrivateCardsFrameProcessor(
+        orchestrator=orchestrator,
+        private_cards=StaticPrivateCardsVision(),
+        broadcaster=broadcaster,
+    )
     revealed_processor = RevealedCardsFrameProcessor(
         orchestrator=orchestrator,
         revealed_cards=StaticRevealedCardsVision(),
@@ -109,6 +144,7 @@ def build_test_runtime(public_vision: PublicVisionSource | None = None) -> Dashb
         orchestrator=orchestrator,
         broadcaster=broadcaster,
         board_processor=processor,
+        private_cards_processor=private_processor,
         revealed_cards_processor=revealed_processor,
         voice_client_factory=FakeVoiceClient,
     )
@@ -126,6 +162,17 @@ def test_index_renders_starter_page():
     assert "Table State" in response.text
     assert "/static/styles.css" in response.text
     assert "/static/app.js" in response.text
+
+
+def test_eliza_client_page_renders_thin_client_assets():
+    client = TestClient(create_app(build_test_runtime()))
+
+    response = client.get("/clients/eliza")
+
+    assert response.status_code == 200
+    assert "Eliza" in response.text
+    assert "Noto+Emoji" in response.text
+    assert "/static/eliza.js" in response.text
 
 
 def test_missing_static_file_returns_not_found():
@@ -276,6 +323,68 @@ def test_api_thin_client_private_cards_trigger_internal_agent_turn():
     assert "agent_decision" in {event["event_type"] for event in payload["events"]}
 
 
+def test_api_thin_client_private_card_frame_triggers_internal_agent_turn():
+    runtime = build_test_runtime()
+    client = TestClient(create_app(runtime))
+    client.post("/api/game/start")
+    runtime.orchestrator.record_public_observation(
+        PublicTableObservation(
+            board_cards=[_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs")],
+            street_hint=Street.FLOP,
+            confidence=0.9,
+        )
+    )
+    runtime.orchestrator.record_public_observation(
+        PublicTableObservation(
+            board_cards=[_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs")],
+            street_hint=Street.FLOP,
+            confidence=0.9,
+        )
+    )
+
+    response = client.post(
+        "/api/clients/eliza/private-cards/frame",
+        json={"source": "eliza_browser_webcam", "data_uri": "data:image/png;base64,dGVzdGZyYW1l"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["accepted"] is True
+    assert payload["state"]["waiting_for"]["agent_id"] == "reachy"
+    assert "agent_decision" in {event["event_type"] for event in payload["events"]}
+
+
+def test_api_client_status_update_appears_in_snapshot():
+    runtime = build_test_runtime()
+    client = TestClient(create_app(runtime))
+
+    response = client.post(
+        "/api/clients/eliza/status",
+        json={"connection": "connected", "status": "Eliza browser connected", "detail": "ready"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["client_id"] == "eliza"
+    assert payload["connection"] == "connected"
+    snapshot = runtime.snapshot()
+    eliza = next(status for status in snapshot["client_statuses"] if status["client_id"] == "eliza")
+    assert eliza["status"] == "Eliza browser connected"
+
+
+def test_client_websocket_receives_only_own_private_state():
+    runtime = build_test_runtime()
+    client = TestClient(create_app(runtime))
+    runtime.orchestrator.start_game()
+    _open_human_action_after_flop(runtime.orchestrator)
+
+    with client.websocket_connect("/ws/clients/eliza") as websocket:
+        initial = websocket.receive_json()
+
+    assert initial["client_id"] == "eliza"
+    assert [state["agent_id"] for state in initial["private_states"]] == ["eliza"]
+
+
 def test_websocket_receives_initial_snapshot_and_start_update():
     runtime = build_test_runtime()
     client = TestClient(create_app(runtime))
@@ -323,6 +432,24 @@ def test_orchestrator_voice_endpoint_returns_audio_for_presentation_event():
     assert response.status_code == 200
     assert response.headers["content-type"] == "audio/mpeg"
     assert response.content.startswith(b"audio:")
+
+
+def test_eliza_voice_endpoint_returns_agent_audio_for_targeted_presentation_event():
+    runtime = build_test_runtime()
+    client = TestClient(create_app(runtime))
+    client.post("/api/game/start")
+    _open_human_action_after_flop(runtime.orchestrator)
+    event = next(
+        event
+        for event in runtime.orchestrator.events()
+        if event.event_type == "presentation_command" and event.payload.get("target_client") == "eliza"
+    )
+
+    response = client.get(f"/api/voice/eliza/{event.event_id}")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "audio/mpeg"
+    assert response.content.startswith(b"eliza:")
 
 
 def test_public_board_frame_submission_advances_recognition_from_browser_image():

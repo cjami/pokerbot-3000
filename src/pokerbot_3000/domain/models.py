@@ -204,6 +204,13 @@ class RevealedCardsFrameInput(PokerBaseModel):
     data_uri: str = Field(min_length=32)
 
 
+class PrivateCardFrameInput(PokerBaseModel):
+    """Client-captured private-card frame submitted for one poker agent."""
+
+    source: str = "thin_client_camera"
+    data_uri: str = Field(min_length=32)
+
+
 class ShowdownSnapshot(PokerBaseModel):
     """Public showdown/runout progress safe for all clients."""
 
@@ -269,6 +276,14 @@ class ClientStatus(PokerBaseModel):
     connection: ClientConnectionState
     status: str = "waiting"
     detail: str | None = None
+
+
+class ClientStatusUpdate(PokerBaseModel):
+    """Status update accepted from a thin client or bridge."""
+
+    connection: ClientConnectionState
+    status: str = Field(min_length=1, max_length=120)
+    detail: str | None = Field(default=None, max_length=300)
 
 
 class GameEvent(PokerBaseModel):

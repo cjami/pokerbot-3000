@@ -15,6 +15,7 @@ from pokerbot_3000.domain.models import (
     ClientConnectionState,
     ClientId,
     ClientStatus,
+    ClientStatusUpdate,
     EventType,
     ExternalInputResult,
     GameEvent,
@@ -100,6 +101,17 @@ class InMemoryOrchestrator:
     def client_statuses(self) -> dict[ClientId, ClientStatus]:
         """Return copies of client statuses keyed by client id."""
         return {client_id: status.model_copy(deep=True) for client_id, status in self._client_statuses.items()}
+
+    def update_client_status(self, client_id: ClientId, update: ClientStatusUpdate) -> ClientStatus:
+        """Record the latest connection status for one external client."""
+        status = ClientStatus(
+            client_id=client_id,
+            connection=update.connection,
+            status=update.status,
+            detail=update.detail,
+        )
+        self._client_statuses[client_id] = status
+        return status.model_copy(deep=True)
 
     def events(self, limit: int = 50) -> list[GameEvent]:
         """Return the most recent event-log entries."""
@@ -454,6 +466,8 @@ class InMemoryOrchestrator:
                 "target_client": profile.client_id,
                 "intent": turn.reaction,
                 "speech": turn.speech,
+                "emotion": turn.emotion,
+                "gesture": turn.gesture,
                 "priority": "normal",
             },
         )

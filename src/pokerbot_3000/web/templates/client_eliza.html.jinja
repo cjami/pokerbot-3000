@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ app_name }} - Pokerbot 3000</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Emoji:wght@300..700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ request.url_for('static', path='styles.css') }}">
+    <script type="module" src="{{ request.url_for('static', path='eliza.js') }}"></script>
+  </head>
+  <body class="min-h-screen bg-table text-ink antialiased" data-client-id="{{ client_id }}">
+    <main class="client-shell">
+      <section class="client-stage" aria-label="Eliza">
+        <div class="client-face" data-eliza-face aria-live="polite">🙂</div>
+        <p class="client-speech" data-eliza-speech>...</p>
+        <div class="client-status-row">
+          <span class="status-pill" data-client-connection>connecting</span>
+          <span class="status-pill" data-client-waiting>{{ state.waiting_for.type if state.waiting_for else "idle" }}</span>
+        </div>
+      </section>
+
+      <section class="client-controls" aria-label="Private card capture">
+        <div class="panel-heading">
+          <h2>Private Camera</h2>
+          <span class="status-pill" data-card-status>idle</span>
+        </div>
+        <video class="client-camera-preview" data-private-camera-preview autoplay muted playsinline></video>
+        <div class="client-actions">
+          <select data-private-camera-device aria-label="Camera">
+            <option value="">Default camera</option>
+          </select>
+          <button class="control-button control-button-primary" type="button" data-capture-private-cards disabled>
+            Capture
+          </button>
+        </div>
+      </section>
+
+      <section class="client-log" aria-label="Eliza events">
+        <ol class="event-list" data-client-events></ol>
+      </section>
+    </main>
+  </body>
+</html>

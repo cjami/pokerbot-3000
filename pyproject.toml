@@ -24,6 +24,13 @@ dependencies = [
 
 [project.scripts]
 pokerbot-3000 = "pokerbot_3000.cli:main"
+pokerbot-reachy-bridge = "pokerbot_3000.reachy_bridge:main"
+
+[project.optional-dependencies]
+reachy = [
+    "pillow",
+    "reachy-mini",
+]
 
 [dependency-groups]
 dev = [

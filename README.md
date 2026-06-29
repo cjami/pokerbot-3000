@@ -33,8 +33,10 @@ CEREBRAS_API_KEY=your_cerebras_api_key_here
 CEREBRAS_MODEL=gemma-4-31b
 ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
 ELEVENLABS_ORCHESTRATOR_VOICE_ID=your_orchestrator_voice_id_here
+ELEVENLABS_ELIZA_VOICE_ID=your_eliza_voice_id_here
 ELEVENLABS_MODEL=eleven_flash_v2_5
 ELEVENLABS_ORCHESTRATOR_SPEED=0.82
+ELEVENLABS_ELIZA_SPEED=0.92
 POKERBOT_VOICE_MODEL=nvidia/parakeet-unified-en-0.6b
 POKERBOT_VAD_THRESHOLD=0.5
 POKERBOT_VAD_MIN_PHRASE_MS=220
@@ -43,6 +45,8 @@ POKERBOT_VAD_MAX_PHRASE_MS=8000
 
 The dashboard uses the browser camera API for public-board frames, so OBS Virtual Camera and other browser-visible devices can be selected directly in the app.
 Human voice input uses the browser microphone selector and streams 16 kHz mono PCM to the server-side Silero + Parakeet pipeline.
+Eliza's thin client is available at `http://127.0.0.1:8000/clients/eliza`.
+Reachy Mini can be connected with `uv run pokerbot-reachy-bridge`; install optional robot dependencies with `uv sync --extra reachy`.
 
 Check model access without starting the web server:
 

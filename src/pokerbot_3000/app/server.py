@@ -6,13 +6,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
-from fastapi import FastAPI, Request, WebSocket
+from fastapi import FastAPI, HTTPException, Request, WebSocket, status
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from pokerbot_3000.app.api import create_api_router
 from pokerbot_3000.app.runtime import DashboardRuntime
+from pokerbot_3000.domain.models import ClientId
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -48,6 +49,18 @@ def create_app(runtime: DashboardRuntime | None = None) -> FastAPI:
     async def events_websocket(websocket: WebSocket) -> None:
         await app_runtime.broadcaster.websocket_endpoint(websocket)
 
+    @app.websocket("/ws/clients/{client_id}")
+    async def client_events_websocket(websocket: WebSocket, client_id: str) -> None:
+        try:
+            parsed_client_id = ClientId(client_id)
+        except ValueError:
+            await websocket.close(code=1008)
+            return
+        await app_runtime.broadcaster.websocket_endpoint(
+            websocket,
+            snapshot_factory=lambda: app_runtime.client_snapshot(parsed_client_id),
+        )
+
     @app.websocket("/ws/voice/human")
     async def human_voice_websocket(websocket: WebSocket) -> None:
         await app_runtime.browser_voice_websocket_endpoint(websocket)
@@ -66,6 +79,21 @@ def create_app(runtime: DashboardRuntime | None = None) -> FastAPI:
                 "private_states": orchestrator.private_states().values(),
                 "state": state,
                 "voice_input": app_runtime.voice_status(),
+            },
+        )
+
+    @app.get("/clients/{client_id}", response_class=Response)
+    async def client_page(request: Request, client_id: str) -> Response:
+        if client_id != ClientId.ELIZA:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown thin client page.")
+        state = orchestrator.public_state()
+        return templates.TemplateResponse(
+            request=request,
+            name="client_eliza.html.jinja",
+            context={
+                "app_name": "Eliza",
+                "client_id": ClientId.ELIZA,
+                "state": state,
             },
         )
 

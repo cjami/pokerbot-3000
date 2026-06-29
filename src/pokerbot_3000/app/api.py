@@ -9,10 +9,14 @@ from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import Response
 
 from pokerbot_3000.domain.models import (
+    ClientId,
+    ClientStatus,
+    ClientStatusUpdate,
     ExternalInputResult,
     GameEvent,
     HumanActionInput,
     OperatorControlResult,
+    PrivateCardFrameInput,
     PrivateCardObservation,
     PublicBoardFrameInput,
     PublicGameState,
@@ -97,6 +101,29 @@ def _create_input_router(runtime: DashboardRuntime) -> APIRouter:
         await runtime.broadcaster.publish_snapshot()
         return result
 
+    @router.post("/clients/{agent_id}/private-cards/frame", response_model=ExternalInputResult)
+    async def submit_client_private_cards_frame(
+        agent_id: str,
+        frame_input: PrivateCardFrameInput,
+    ) -> ExternalInputResult:
+        """Consume a thin-client private-card image frame."""
+        if PUBLIC_BOARD_FRAME_DATA_URI.fullmatch(frame_input.data_uri) is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Private-card frame must be a JPEG or PNG data URI.",
+            )
+        return await runtime.process_private_cards_frame(
+            agent_id,
+            ImageFrame(source=frame_input.source, data_uri=frame_input.data_uri),
+        )
+
+    @router.post("/clients/{client_id}/status", response_model=ClientStatus)
+    async def update_client_status(client_id: ClientId, update: ClientStatusUpdate) -> ClientStatus:
+        """Record a thin-client connection/status update."""
+        client_status = orchestrator.update_client_status(client_id, update)
+        await runtime.broadcaster.publish_snapshot()
+        return client_status
+
     return router
 
 
@@ -108,6 +135,17 @@ def _create_voice_router(runtime: DashboardRuntime) -> APIRouter:
         """Return generated ElevenLabs audio for one orchestrator speech event."""
         try:
             audio = await runtime.synthesize_orchestrator_event(event_id)
+        except ElevenLabsConfigurationError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        except ElevenLabsClientError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        return Response(content=audio, media_type="audio/mpeg")
+
+    @router.get("/voice/eliza/{event_id}", response_class=Response)
+    async def get_eliza_voice(event_id: str) -> Response:
+        """Return generated ElevenLabs audio for one Eliza speech event."""
+        try:
+            audio = await runtime.synthesize_eliza_event(event_id)
         except ElevenLabsConfigurationError as exc:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         except ElevenLabsClientError as exc:

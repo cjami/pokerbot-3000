@@ -4,7 +4,7 @@
   "scripts": {
     "assets": "npm run assets:css && npm run assets:js",
     "assets:css": "tailwindcss -i src/pokerbot_3000/web/static/input.css -o build/web/static/styles.css --minify",
-    "assets:js": "esbuild src/pokerbot_3000/web/static/app.js --bundle --minify --format=esm --outfile=build/web/static/app.js"
+    "assets:js": "esbuild src/pokerbot_3000/web/static/app.js src/pokerbot_3000/web/static/eliza.js --bundle --minify --format=esm --outdir=build/web/static"
   },
   "devDependencies": {
     "@tailwindcss/cli": "^4",

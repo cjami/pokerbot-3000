@@ -7,7 +7,7 @@ setup:
 assets:
 	node -e "require('fs').mkdirSync('build/web/static',{recursive:true})"
 	npm exec -- tailwindcss -i src/pokerbot_3000/web/static/input.css -o build/web/static/styles.css --minify
-	npm exec -- esbuild src/pokerbot_3000/web/static/app.js --bundle --minify --format=esm --outfile=build/web/static/app.js
+	npm exec -- esbuild src/pokerbot_3000/web/static/app.js src/pokerbot_3000/web/static/eliza.js --bundle --minify --format=esm --outdir=build/web/static
 
 test:
 	uv run pytest
