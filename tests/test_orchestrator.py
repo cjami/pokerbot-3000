@@ -64,6 +64,8 @@ def test_orchestrator_flop_betting_runs_until_turn_recognition_needed():
     assert result.state.waiting_for is not None
     assert result.state.waiting_for.type == PendingInputType.PUBLIC_BOARD_CARDS
     assert result.state.board_recognition.expected_card_count == 4
+    assert "action_proposed" in {event.event_type for event in result.events}
+    assert "action_committed" in {event.event_type for event in result.events}
 
 
 def test_orchestrator_commits_flop_then_pauses_for_postflop_action():

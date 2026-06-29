@@ -295,6 +295,20 @@ function renderClients(clients) {
   }
 }
 
+function renderVoiceInput(voiceInput) {
+  text("[data-voice-state]", voiceInput?.state ?? "unknown");
+  text("[data-voice-transcript]", voiceInput?.latest_transcript ?? "none");
+  text("[data-voice-action]", voiceActionLabel(voiceInput?.latest_action));
+  text("[data-voice-issue]", voiceInput?.last_error ?? voiceInput?.last_rejection ?? "none");
+}
+
+function voiceActionLabel(action) {
+  if (!action?.type) {
+    return "none";
+  }
+  return action.amount ? `${action.type} ${action.amount}` : action.type;
+}
+
 function renderActions(actions) {
   const container = document.querySelector("[data-legal-actions]");
   if (!container) {
@@ -450,6 +464,7 @@ function renderSnapshot(snapshot) {
   renderShowdown(state.showdown);
   renderPrivateStates(snapshot.private_states);
   renderClients(snapshot.client_statuses);
+  renderVoiceInput(snapshot.voice_input);
   renderActions(state.legal_actions);
   renderUncertainties(state.uncertainties);
   renderEvents(snapshot.events);

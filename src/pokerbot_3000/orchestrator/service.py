@@ -207,6 +207,18 @@ class InMemoryOrchestrator:
                 state=self.public_state(),
             )
 
+        if request.source == "voice":
+            self._append_event(
+                EventType.ACTION_PROPOSED,
+                source=request.source,
+                summary=f"S{request.seat} proposed {request.action.type} by voice.",
+                payload={
+                    "seat": request.seat,
+                    "action": request.action.model_dump(mode="json"),
+                    "raw_transcript": request.raw_transcript,
+                    "confidence": request.confidence,
+                },
+            )
         self._commit_action(request.seat, request.action, source=request.source)
         self._advance_after_action()
         return ExternalInputResult(
@@ -1055,8 +1067,8 @@ class InMemoryOrchestrator:
             ),
             ClientId.VOICE: ClientStatus(
                 client_id=ClientId.VOICE,
-                connection=ClientConnectionState.DISCONNECTED,
-                status="human voice input adapter pending",
+                connection=ClientConnectionState.READY,
+                status="server-side human voice worker",
             ),
             ClientId.PUBLIC_VISION: ClientStatus(
                 client_id=ClientId.PUBLIC_VISION,

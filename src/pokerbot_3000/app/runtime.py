@@ -14,15 +14,23 @@ from pokerbot_3000.domain.models import EventType, ExternalInputResult
 from pokerbot_3000.orchestrator import InMemoryOrchestrator
 from pokerbot_3000.perception import LazyGemmaPublicVisionSource, LazyGemmaRevealedCardsSource
 from pokerbot_3000.voice import (
+    DeterministicVoiceCommandParser,
     ElevenLabsClient,
     ElevenLabsClientError,
     ElevenLabsConfig,
+    ParakeetSpeechTranscriber,
+    SileroVoiceActivityDetector,
+    SoundDeviceAudioInput,
+    VoiceActionAdapters,
+    VoiceActionCoordinator,
+    VoiceInputStatus,
 )
 
 if TYPE_CHECKING:
     from pokerbot_3000.domain.models import GameEvent, OperatorControlResult
     from pokerbot_3000.ports.llm import ImageFrame
     from pokerbot_3000.ports.perception import PublicVisionSource, RevealedCardsSource
+    from pokerbot_3000.voice.coordinator import VoiceActionCoordinator as VoiceActionCoordinatorType
 
 type DashboardMessage = dict[str, Any]
 type SnapshotFactory = Callable[[], DashboardMessage]
@@ -195,6 +203,7 @@ class DashboardRuntime:
     broadcaster: DashboardEventBroadcaster
     board_processor: PublicBoardFrameProcessor
     revealed_cards_processor: RevealedCardsFrameProcessor
+    voice_coordinator: VoiceActionCoordinatorType | None = None
     voice_client_factory: VoiceClientFactory = _default_voice_client_factory
     _voice_client: SpeechSynthesisClient | None = field(default=None, init=False)
     _audio_cache: dict[str, bytes] = field(default_factory=dict, init=False)
@@ -225,14 +234,31 @@ class DashboardRuntime:
             broadcaster=broadcaster,
             after_events=handle_events,
         )
+        voice_coordinator = VoiceActionCoordinator(
+            orchestrator=orchestrator,
+            adapters=VoiceActionAdapters(
+                audio_input=SoundDeviceAudioInput(),
+                vad=SileroVoiceActivityDetector(),
+                transcriber=ParakeetSpeechTranscriber(),
+                parser=DeterministicVoiceCommandParser(),
+            ),
+            after_events=handle_events,
+            publish_snapshot=broadcaster.publish_snapshot,
+        )
         runtime = cls(
             orchestrator=orchestrator,
             broadcaster=broadcaster,
             board_processor=board_processor,
             revealed_cards_processor=revealed_cards_processor,
+            voice_coordinator=voice_coordinator,
         )
         runtime_ref["runtime"] = runtime
         return runtime
+
+    async def startup(self) -> None:
+        """Start runtime-owned background workers."""
+        if self.voice_coordinator is not None:
+            self.voice_coordinator.start()
 
     async def start_game(self) -> OperatorControlResult:
         """Start the game and wait for browser-submitted recognition frames."""
@@ -250,6 +276,8 @@ class DashboardRuntime:
 
     async def shutdown(self) -> None:
         """Stop runtime-owned background tasks."""
+        if self.voice_coordinator is not None:
+            await self.voice_coordinator.stop()
         await asyncio.gather(*self._audio_tasks.values(), return_exceptions=True)
 
     def snapshot(self) -> DashboardMessage:
@@ -258,13 +286,18 @@ class DashboardRuntime:
             "type": "snapshot",
             "state": self.orchestrator.public_state().model_dump(mode="json"),
             "events": [event.model_dump(mode="json") for event in self.orchestrator.events(limit=25)],
-            "private_states": [
-                state.model_dump(mode="json") for state in self.orchestrator.private_states().values()
-            ],
+            "private_states": [state.model_dump(mode="json") for state in self.orchestrator.private_states().values()],
             "client_statuses": [
                 status.model_dump(mode="json") for status in self.orchestrator.client_statuses().values()
             ],
+            "voice_input": self.voice_status(),
         }
+
+    def voice_status(self) -> dict[str, Any]:
+        """Return the public server-side voice worker status."""
+        if self.voice_coordinator is None:
+            return VoiceInputStatus(state="not_configured").model_dump()
+        return self.voice_coordinator.status.model_dump()
 
     def latest_public_frame(self) -> ImageFrame | None:
         """Return the latest browser public-table frame sent to Gemma."""

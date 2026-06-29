@@ -31,6 +31,7 @@ def create_app(runtime: DashboardRuntime | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        await app_runtime.startup()
         try:
             yield
         finally:
@@ -60,6 +61,7 @@ def create_app(runtime: DashboardRuntime | None = None) -> FastAPI:
                 "players": sorted(state.players.items()),
                 "private_states": orchestrator.private_states().values(),
                 "state": state,
+                "voice_input": app_runtime.voice_status(),
             },
         )
 

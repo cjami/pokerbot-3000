@@ -229,6 +229,8 @@ def test_api_human_action_advances_until_eliza_input_needed():
     assert payload["state"]["pot"] == 300
     assert payload["state"]["waiting_for"]["type"] == "public_board_cards"
     assert payload["state"]["board_recognition"]["expected_card_count"] == 4
+    assert "action_proposed" in {event["event_type"] for event in payload["events"]}
+    assert "action_committed" in {event["event_type"] for event in payload["events"]}
 
 
 def test_api_thin_client_private_cards_trigger_internal_agent_turn():
@@ -280,6 +282,7 @@ def test_websocket_receives_initial_snapshot_and_start_update():
         initial = websocket.receive_json()
         assert initial["type"] == "snapshot"
         assert initial["state"]["automation_status"] == "stopped"
+        assert initial["voice_input"]["state"] == "not_configured"
 
         client.post("/api/game/start")
         update = websocket.receive_json()

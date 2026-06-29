@@ -13,8 +13,13 @@ dependencies = [
     "eval7==0.1.10",
     "fastapi",
     "jinja2",
+    "nemo_toolkit[asr]",
+    "numpy",
     "pydantic",
     "python-dotenv",
+    "silero-vad",
+    "sounddevice",
+    "torch",
     "uvicorn[standard]",
 ]
 

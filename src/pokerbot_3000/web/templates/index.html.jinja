@@ -232,6 +232,33 @@
 
         <div class="panel">
           <div class="panel-heading">
+            <h2>Voice Input</h2>
+            <span class="status-pill" data-voice-state>{{ voice_input.state }}</span>
+          </div>
+          <dl class="grid gap-2 text-sm">
+            <div class="row-stat">
+              <dt>Transcript</dt>
+              <dd data-voice-transcript>{{ voice_input.latest_transcript or "none" }}</dd>
+            </div>
+            <div class="row-stat">
+              <dt>Action</dt>
+              <dd data-voice-action>
+                {% if voice_input.latest_action %}
+                  {{ voice_input.latest_action.type }}{% if voice_input.latest_action.amount %} {{ voice_input.latest_action.amount }}{% endif %}
+                {% else %}
+                  none
+                {% endif %}
+              </dd>
+            </div>
+            <div class="row-stat">
+              <dt>Issue</dt>
+              <dd data-voice-issue>{{ voice_input.last_error or voice_input.last_rejection or "none" }}</dd>
+            </div>
+          </dl>
+        </div>
+
+        <div class="panel">
+          <div class="panel-heading">
             <h2>Legal Actions</h2>
           </div>
           <div class="flex flex-wrap gap-2" data-legal-actions>
