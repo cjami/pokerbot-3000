@@ -41,7 +41,7 @@ def test_reachy_bridge_submits_private_card_frame_when_requested():
     http.state = {"waiting_for": {"type": "private_cards", "agent_id": "reachy"}}
     reachy = _FakeReachy()
     bridge = ReachyBridge(
-        config=BridgeConfig(manual_confirm=False),
+        config=BridgeConfig(),
         http=http,
         reachy=reachy,
     )

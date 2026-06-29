@@ -55,7 +55,7 @@ class BridgeConfig:
     base_url: str = DEFAULT_BASE_URL
     poll_seconds: float = DEFAULT_POLL_SECONDS
     source: str = DEFAULT_SOURCE
-    manual_confirm: bool = True
+    manual_confirm: bool = False
 
 
 class UrllibBridgeHttpClient:
@@ -142,6 +142,9 @@ class ReachyMiniAdapter:
             raise BridgeError(msg) from exc
 
         frame = self._mini.media.get_frame()
+        if frame is None:
+            msg = "Reachy camera did not return a frame."
+            raise BridgeError(msg)
         buffer = BytesIO()
         image_module.fromarray(frame).save(buffer, format="PNG")
         encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
@@ -156,6 +159,7 @@ class ReachyMiniAdapter:
     def _move(self, emotion: str) -> None:
         try:
             np = importlib.import_module("numpy")
+            reachy_core = importlib.import_module("reachy_mini.reachy_mini")
             reachy_utils = importlib.import_module("reachy_mini.utils")
         except ImportError as exc:
             msg = "Reachy movement dependencies are unavailable."
@@ -167,7 +171,7 @@ class ReachyMiniAdapter:
             antennas=np.deg2rad([pose.left_antenna_deg, pose.right_antenna_deg]),
             body_yaw=np.deg2rad(pose.body_yaw_deg),
             duration=pose.duration,
-            method="cartoon",
+            method=reachy_core.InterpolationTechnique.CARTOON,
         )
 
 
@@ -278,7 +282,7 @@ def main(argv: list[str] | None = None) -> None:
         base_url=args.base_url,
         poll_seconds=args.poll_seconds,
         source=args.source,
-        manual_confirm=not args.auto_capture,
+        manual_confirm=args.manual_confirm,
     )
     adapter: ReachyAdapter = ConsoleReachyAdapter() if args.console_only else ReachyMiniAdapter()
     try:
@@ -294,7 +298,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Pokerbot app base URL.")
     parser.add_argument("--poll-seconds", default=DEFAULT_POLL_SECONDS, type=float, help="Polling interval.")
     parser.add_argument("--source", default=DEFAULT_SOURCE, help="Private-card frame source label.")
-    parser.add_argument("--auto-capture", action="store_true", help="Capture as soon as the orchestrator asks.")
+    capture_mode = parser.add_mutually_exclusive_group()
+    capture_mode.add_argument("--auto-capture", action="store_true", help="Capture as soon as the orchestrator asks.")
+    capture_mode.add_argument("--manual-confirm", action="store_true", help="Prompt before capturing private cards.")
     parser.add_argument("--console-only", action="store_true", help="Run without connecting to Reachy hardware.")
     return parser.parse_args(argv)
 

@@ -81,6 +81,28 @@ def test_orchestrator_preflop_call_round_requests_flop_with_pot_aware_speech():
     assert "The pot is 60. Please lay out the flop." in speech
 
 
+def test_orchestrator_prompts_agents_to_check_private_cards():
+    orchestrator = InMemoryOrchestrator()
+    orchestrator.start_game()
+
+    eliza_result = orchestrator.submit_human_action(HumanActionInput.model_validate({"action": {"type": "call"}}))
+    _record_private(orchestrator, "eliza")
+    reachy_result = orchestrator.submit_agent_decision(_decision("eliza", "call"))
+
+    eliza_speech = [
+        event.payload.get("speech")
+        for event in eliza_result.events
+        if event.event_type == EventType.PRESENTATION_COMMAND and event.payload.get("voice") == "orchestrator"
+    ]
+    reachy_speech = [
+        event.payload.get("speech")
+        for event in reachy_result.events
+        if event.event_type == EventType.PRESENTATION_COMMAND and event.payload.get("voice") == "orchestrator"
+    ]
+    assert "Eliza, check your cards." in eliza_speech
+    assert "Reachy, check your cards." in reachy_speech
+
+
 def test_orchestrator_commits_flop_then_pauses_for_first_postflop_agent_action():
     orchestrator = InMemoryOrchestrator()
     _complete_preflop(orchestrator)

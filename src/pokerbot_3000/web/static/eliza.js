@@ -5,17 +5,21 @@ const connection = document.querySelector("[data-client-connection]");
 const waiting = document.querySelector("[data-client-waiting]");
 const cameraDevice = document.querySelector("[data-private-camera-device]");
 const cameraPreview = document.querySelector("[data-private-camera-preview]");
-const captureButton = document.querySelector("[data-capture-private-cards]");
 const cardStatus = document.querySelector("[data-card-status]");
 const eventList = document.querySelector("[data-client-events]");
 
 const DEFAULT_FACE = "🙂";
 const FRAME_WIDTH = 1600;
 const FRAME_MIME_TYPE = "image/png";
+const ANTI_FLICKER_FRAME_RATE = 25;
 const expressedEventIds = new Set();
 let cameraStream = null;
 let latestSnapshot = null;
 let faceResetTimer = null;
+let captureInFlight = false;
+let submittedCaptureKey = null;
+let captureRetryTimer = null;
+let observedHandId = null;
 
 const emojiByEmotion = {
   calm: "🙂",
@@ -64,13 +68,28 @@ function connectEvents() {
 
 function renderSnapshot(snapshot) {
   latestSnapshot = snapshot;
+  const handId = snapshot.state?.hand_id ?? null;
+  if (handId !== observedHandId || snapshot.state?.automation_status === "stopped") {
+    observedHandId = handId;
+    submittedCaptureKey = null;
+  }
   const waitingFor = snapshot.state?.waiting_for;
-  const shouldCapture = waitingFor?.type === "private_cards" && waitingFor.agent_id === clientId;
-  captureButton.disabled = !shouldCapture;
+  const privateState = snapshot.private_states?.[0];
+  const shouldCapture =
+    waitingFor?.type === "private_cards" && waitingFor.agent_id === clientId && !hasCompletePrivateCards(privateState);
+  if (!shouldCapture && captureRetryTimer) {
+    globalThis.clearTimeout(captureRetryTimer);
+    captureRetryTimer = null;
+  }
   setText(waiting, shouldCapture ? "show cards" : (waitingFor?.type ?? "idle"));
-  setText(cardStatus, privateCardStatus(snapshot.private_states?.[0], shouldCapture));
+  setText(cardStatus, privateCardStatus(privateState, shouldCapture));
   renderEvents(snapshot.events ?? []);
   handlePresentationEvents(snapshot.events ?? []);
+  maybeAutoCapturePrivateCards(shouldCapture);
+}
+
+function hasCompletePrivateCards(privateState) {
+  return (privateState?.hole_cards?.length ?? 0) >= 2;
 }
 
 function privateCardStatus(privateState, shouldCapture) {
@@ -197,12 +216,33 @@ async function ensureCameraStream() {
     return;
   }
   const deviceId = cameraDevice?.value;
-  cameraStream = await navigator.mediaDevices.getUserMedia({
-    video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: "environment" },
-    audio: false,
-  });
+  cameraStream = await getCameraStream(deviceId);
   cameraPreview.srcObject = cameraStream;
   await loadCameraDevices();
+}
+
+async function getCameraStream(deviceId) {
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      video: videoConstraints(deviceId, { frameRate: { ideal: ANTI_FLICKER_FRAME_RATE, max: ANTI_FLICKER_FRAME_RATE } }),
+      audio: false,
+    });
+  } catch (error) {
+    if (error?.name !== "OverconstrainedError") {
+      throw error;
+    }
+    return navigator.mediaDevices.getUserMedia({
+      video: videoConstraints(deviceId),
+      audio: false,
+    });
+  }
+}
+
+function videoConstraints(deviceId, extras = {}) {
+  return {
+    ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: "environment" }),
+    ...extras,
+  };
 }
 
 function cameraUnavailableMessage() {
@@ -221,19 +261,61 @@ function stopCameraStream() {
 
 async function chooseCameraDevice() {
   stopCameraStream();
+  submittedCaptureKey = null;
   await ensureCameraStream();
 }
 
-async function capturePrivateCards() {
-  if (!latestSnapshot?.state?.waiting_for || captureButton.disabled) {
+function privateCardCaptureKey() {
+  const state = latestSnapshot?.state;
+  const waitingFor = state?.waiting_for;
+  if (hasCompletePrivateCards(latestSnapshot?.private_states?.[0])) {
+    return null;
+  }
+  if (waitingFor?.type !== "private_cards" || waitingFor.agent_id !== clientId) {
+    return null;
+  }
+  return `${state.hand_id}:${waitingFor.agent_id}:${waitingFor.type}`;
+}
+
+function maybeAutoCapturePrivateCards(shouldCapture) {
+  if (!shouldCapture || captureInFlight) {
     return;
   }
-  captureButton.disabled = true;
+  const captureKey = privateCardCaptureKey();
+  if (!captureKey || submittedCaptureKey === captureKey) {
+    return;
+  }
+  capturePrivateCards().catch(() => {
+    submittedCaptureKey = null;
+    setText(cardStatus, "capture failed");
+  });
+}
+
+function retryAutoCapture() {
+  if (captureRetryTimer) {
+    return;
+  }
+  captureRetryTimer = globalThis.setTimeout(() => {
+    captureRetryTimer = null;
+    const waitingFor = latestSnapshot?.state?.waiting_for;
+    maybeAutoCapturePrivateCards(waitingFor?.type === "private_cards" && waitingFor.agent_id === clientId);
+  }, 700);
+}
+
+async function capturePrivateCards() {
+  const captureKey = privateCardCaptureKey();
+  if (!captureKey || submittedCaptureKey === captureKey) {
+    return;
+  }
+  captureInFlight = true;
+  submittedCaptureKey = captureKey;
   setText(cardStatus, "reading");
   try {
     await ensureCameraStream();
     if (cameraPreview.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
       setText(cardStatus, "camera warming");
+      submittedCaptureKey = null;
+      retryAutoCapture();
       return;
     }
     const response = await fetch(`/api/clients/${clientId}/private-cards/frame`, {
@@ -246,8 +328,12 @@ async function capturePrivateCards() {
     });
     const payload = await response.json();
     setText(cardStatus, payload.reason ?? (response.ok ? "submitted" : "rejected"));
+    if (!response.ok || !payload.accepted) {
+      submittedCaptureKey = null;
+      retryAutoCapture();
+    }
   } finally {
-    captureButton.disabled = false;
+    captureInFlight = false;
   }
 }
 
@@ -263,9 +349,6 @@ function captureVideoFrame(video) {
 
 cameraDevice?.addEventListener("change", () => {
   chooseCameraDevice().catch(() => setText(cardStatus, "camera failed"));
-});
-captureButton?.addEventListener("click", () => {
-  capturePrivateCards().catch(() => setText(cardStatus, "capture failed"));
 });
 
 setText(face, DEFAULT_FACE);

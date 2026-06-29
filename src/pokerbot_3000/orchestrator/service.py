@@ -951,6 +951,10 @@ class InMemoryOrchestrator:
             summary=f"Engine paused for {profile.display_name} private-card input.",
             payload=self._state.waiting_for.model_dump(mode="json"),
         )
+        self._queue_orchestrator_speech(
+            f"{profile.display_name}, check your cards.",
+            intent="request_private_cards",
+        )
 
     def _pause_for_agent_action(self, agent_id: str) -> None:
         profile = self._agent_profiles[agent_id]
