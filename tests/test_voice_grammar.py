@@ -27,6 +27,15 @@ def test_voice_grammar_parses_amount_actions_from_words_and_digits():
     assert call.action.amount == 25
 
 
+def test_voice_grammar_parses_common_asr_action_variants():
+    parser = DeterministicVoiceCommandParser()
+
+    assert _parse_required(parser, "raised it to two hundred").action.type == ActionType.RAISE_TO
+    assert _parse_required(parser, "raised it to two hundred").action.amount == 200
+    assert _parse_required(parser, "called").action.type == ActionType.CALL
+    assert _parse_required(parser, "folded").action.type == ActionType.FOLD
+
+
 def test_voice_grammar_rejects_unclear_or_unsafe_speech():
     parser = DeterministicVoiceCommandParser()
 

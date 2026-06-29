@@ -44,6 +44,19 @@ class _StaticTranscriber:
         return VoiceTranscript(text=self.text, confidence=0.93)
 
 
+class _WarmableStaticTranscriber(_StaticTranscriber):
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self.events: list[str] = []
+
+    async def warm_up(self) -> None:
+        self.events.append("warm_up")
+
+    async def transcribe(self, segment: AudioChunk) -> VoiceTranscript:
+        self.events.append("transcribe")
+        return await super().transcribe(segment)
+
+
 def test_voice_coordinator_submits_parsed_action_when_waiting_for_human():
     async def scenario() -> None:
         orchestrator = InMemoryOrchestrator()
@@ -84,6 +97,82 @@ def test_voice_coordinator_submits_parsed_action_when_waiting_for_human():
     asyncio.run(scenario())
 
 
+def test_voice_coordinator_warms_transcriber_before_first_segment():
+    async def scenario() -> None:
+        orchestrator = InMemoryOrchestrator()
+        orchestrator.start_game()
+        transcriber = _WarmableStaticTranscriber("call")
+        coordinator = VoiceActionCoordinator(
+            orchestrator=orchestrator,
+            adapters=VoiceActionAdapters(
+                audio_input=_OneShotAudioInput(),
+                vad=_PassThroughVad(),
+                transcriber=transcriber,
+                parser=DeterministicVoiceCommandParser(),
+            ),
+        )
+
+        coordinator.start()
+        await _wait_for(lambda: coordinator.status.latest_action is not None)
+        await coordinator.stop()
+
+        assert transcriber.events == ["warm_up", "transcribe"]
+        assert coordinator.status.transcriber_ready is True
+
+    asyncio.run(scenario())
+
+
+def test_voice_coordinator_treats_bet_as_raise_when_facing_action():
+    async def scenario() -> None:
+        orchestrator = InMemoryOrchestrator()
+        orchestrator.start_game()
+        coordinator = VoiceActionCoordinator(
+            orchestrator=orchestrator,
+            adapters=VoiceActionAdapters(
+                audio_input=_OneShotAudioInput(),
+                vad=_PassThroughVad(),
+                transcriber=_StaticTranscriber("bet two hundred"),
+                parser=DeterministicVoiceCommandParser(),
+            ),
+        )
+
+        coordinator.start()
+        await _wait_for(lambda: coordinator.status.latest_action is not None)
+        await coordinator.stop()
+
+        human = orchestrator.public_state().players[1]
+        assert human.committed_this_hand == 200
+        assert coordinator.status.latest_action == {"type": "raise_to", "amount": 200, "unit": "chips"}
+
+    asyncio.run(scenario())
+
+
+def test_voice_coordinator_treats_raise_as_bet_when_opening_action():
+    async def scenario() -> None:
+        orchestrator = InMemoryOrchestrator()
+        orchestrator.start_game()
+        _open_human_action_after_flop(orchestrator)
+        coordinator = VoiceActionCoordinator(
+            orchestrator=orchestrator,
+            adapters=VoiceActionAdapters(
+                audio_input=_OneShotAudioInput(),
+                vad=_PassThroughVad(),
+                transcriber=_StaticTranscriber("raise to two hundred"),
+                parser=DeterministicVoiceCommandParser(),
+            ),
+        )
+
+        coordinator.start()
+        await _wait_for(lambda: coordinator.status.latest_action is not None)
+        await coordinator.stop()
+
+        human = orchestrator.public_state().players[1]
+        assert human.committed_this_street == 200
+        assert coordinator.status.latest_action == {"type": "bet", "amount": 200, "unit": "chips"}
+
+    asyncio.run(scenario())
+
+
 def test_voice_coordinator_ignores_segments_when_not_waiting_for_human():
     async def scenario() -> None:
         orchestrator = InMemoryOrchestrator()
@@ -105,6 +194,12 @@ def test_voice_coordinator_ignores_segments_when_not_waiting_for_human():
         await coordinator.stop()
 
         assert transcriber.calls == 0
+        assert coordinator.status.speech_segment_count == 1
+        assert coordinator.status.ignored_segment_count == 1
+        assert (
+            coordinator.status.last_rejection
+            == "Ignored speech because the engine is waiting for public_board_cards."
+        )
         waiting_for = orchestrator.public_state().waiting_for
         assert waiting_for is not None
         assert waiting_for.type == PendingInputType.PUBLIC_BOARD_CARDS

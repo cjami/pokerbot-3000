@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import sys
 from types import SimpleNamespace
 from typing import Any, cast
@@ -8,10 +9,12 @@ import pytest
 
 from pokerbot_3000.reachy_bridge import (
     BridgeConfig,
+    BridgeError,
     ReachyBridge,
     ReachyDaemonHttpAdapter,
     ReachyMiniAdapter,
     ReachySdkConfig,
+    _build_reachy_adapter,
 )
 
 
@@ -20,6 +23,7 @@ class _FakeHttpClient:
         self.posts: list[tuple[str, dict[str, Any]]] = []
         self.state: dict[str, Any] = {"waiting_for": None}
         self.events: list[dict[str, Any]] = []
+        self.audio_by_path: dict[str, bytes] = {}
         self.actions = actions
 
     def get_json(self, path: str) -> dict[str, Any] | list[dict[str, Any]]:
@@ -31,6 +35,11 @@ class _FakeHttpClient:
             return self.events
         raise AssertionError(path)
 
+    def get_bytes(self, path: str) -> bytes:
+        if self.actions is not None:
+            self.actions.append(f"get-bytes:{path}")
+        return self.audio_by_path.get(path, b"reachy-audio")
+
     def post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         self.posts.append((path, payload))
         if self.actions is not None:
@@ -39,11 +48,13 @@ class _FakeHttpClient:
 
 
 class _FakeReachy:
-    def __init__(self, actions: list[str] | None = None) -> None:
-        self.presentations: list[tuple[str, str | None]] = []
+    def __init__(self, actions: list[str] | None = None, capture_error: str | None = None) -> None:
+        self.presentations: list[tuple[str, str | None, str | None]] = []
+        self.voice_audio: list[bytes | None] = []
         self.wake_count = 0
         self.capture_count = 0
         self.actions = actions
+        self.capture_error = capture_error
 
     def wake_up(self) -> None:
         self.wake_count += 1
@@ -52,12 +63,21 @@ class _FakeReachy:
 
     def capture_private_cards(self) -> str:
         self.capture_count += 1
+        if self.capture_error is not None:
+            raise BridgeError(self.capture_error)
         return "data:image/png;base64,dGVzdA=="
 
-    def perform(self, emotion: str, speech: str | None) -> None:
-        self.presentations.append((emotion, speech))
+    def perform(
+        self,
+        emotion: str,
+        speech: str | None,
+        voice_audio: bytes | None = None,
+        gesture: str | None = None,
+    ) -> None:
+        self.presentations.append((emotion, speech, gesture))
+        self.voice_audio.append(voice_audio)
         if self.actions is not None:
-            self.actions.append(f"perform:{emotion}:{speech or ''}")
+            self.actions.append(f"perform:{emotion}:{speech or ''}:{gesture or ''}")
 
 
 def test_reachy_bridge_wakes_after_connect_before_polling(monkeypatch):
@@ -80,7 +100,6 @@ def test_reachy_bridge_wakes_after_connect_before_polling(monkeypatch):
     assert actions == [
         "post:/api/clients/reachy/status:connected",
         "wake_up",
-        "get:/api/state",
         "get:/api/events?limit=25",
         "sleep:0.01",
         "post:/api/clients/reachy/status:disconnected",
@@ -111,30 +130,76 @@ def test_reachy_bridge_can_skip_wake_on_connect(monkeypatch):
     assert "wake_up" not in actions
     assert actions == [
         "post:/api/clients/reachy/status:connected",
-        "get:/api/state",
         "get:/api/events?limit=25",
         "sleep:0.01",
         "post:/api/clients/reachy/status:disconnected",
     ]
 
 
-def test_reachy_bridge_submits_private_card_frame_when_requested():
+def test_reachy_bridge_does_not_capture_private_cards_from_passive_state():
     http = _FakeHttpClient()
     http.state = {"waiting_for": {"type": "private_cards", "agent_id": "reachy"}}
     reachy = _FakeReachy()
-    bridge = ReachyBridge(
-        config=BridgeConfig(),
-        http=http,
-        reachy=reachy,
-    )
+    bridge = ReachyBridge(config=BridgeConfig(), http=http, reachy=reachy)
 
+    bridge.tick()
+
+    assert reachy.capture_count == 0
+    assert http.posts == []
+
+
+def test_reachy_bridge_submits_private_card_frame_for_targeted_request():
+    http = _FakeHttpClient()
+    http.events = [
+        {
+            "event_id": "evt_cards",
+            "payload": {
+                "target_client": "reachy",
+                "intent": "request_private_cards",
+                "emotion": "calm",
+                "gesture": "look_down",
+            },
+        }
+    ]
+    reachy = _FakeReachy()
+    bridge = ReachyBridge(config=BridgeConfig(capture_settle_seconds=0), http=http, reachy=reachy)
+
+    bridge.tick()
+    bridge.tick()
+
+    assert reachy.capture_count == 1
+    assert reachy.presentations == [("calm", None, "look_down")]
+    assert http.posts == [
+        (
+            "/api/clients/reachy/private-cards/frame",
+            {"source": "reachy_private_camera", "data_uri": "data:image/png;base64,dGVzdA=="},
+        )
+    ]
+
+
+def test_reachy_bridge_reports_private_card_capture_error_without_stopping():
+    http = _FakeHttpClient()
+    http.events = [
+        {
+            "event_id": "evt_cards",
+            "payload": {"target_client": "reachy", "intent": "request_private_cards", "emotion": "calm"},
+        }
+    ]
+    reachy = _FakeReachy(capture_error="No camera in daemon mode.")
+    bridge = ReachyBridge(config=BridgeConfig(capture_settle_seconds=0), http=http, reachy=reachy)
+
+    bridge.tick()
     bridge.tick()
 
     assert reachy.capture_count == 1
     assert http.posts == [
         (
-            "/api/clients/reachy/private-cards/frame",
-            {"source": "reachy_private_camera", "data_uri": "data:image/png;base64,dGVzdA=="},
+            "/api/clients/reachy/status",
+            {
+                "connection": "error",
+                "status": "Reachy private-card capture unavailable",
+                "detail": "No camera in daemon mode.",
+            },
         )
     ]
 
@@ -147,13 +212,15 @@ def test_reachy_bridge_performs_targeted_presentation_once():
             "payload": {"target_client": "reachy", "emotion": "confident", "speech": "Reachy calls."},
         }
     ]
+    http.audio_by_path["/api/voice/reachy/evt_1"] = b"mp3-bytes"
     reachy = _FakeReachy()
-    bridge = ReachyBridge(config=BridgeConfig(manual_confirm=False), http=http, reachy=reachy)
+    bridge = ReachyBridge(config=BridgeConfig(), http=http, reachy=reachy)
 
     bridge.tick()
     bridge.tick()
 
-    assert reachy.presentations == [("confident", "Reachy calls.")]
+    assert reachy.presentations == [("confident", "Reachy calls.", None)]
+    assert reachy.voice_audio == [b"mp3-bytes"]
 
 
 def test_reachy_daemon_http_adapter_posts_symbolic_movement(monkeypatch):
@@ -192,7 +259,8 @@ def test_reachy_daemon_http_adapter_posts_symbolic_movement(monkeypatch):
     }
 
 
-def test_reachy_daemon_http_adapter_uses_builtin_wake_up(monkeypatch):
+def test_reachy_daemon_http_adapter_enables_motors_and_posts_ready_pose(monkeypatch):
+    posts: list[tuple[str, dict[str, Any]]] = []
     captured: dict[str, object] = {}
 
     class FakeDaemonHttp:
@@ -200,7 +268,7 @@ def test_reachy_daemon_http_adapter_uses_builtin_wake_up(monkeypatch):
             captured["base_url"] = base_url
 
         def post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-            captured["post"] = (path, payload)
+            posts.append((path, payload))
             return {"uuid": "wake-1"}
 
     monkeypatch.setattr("pokerbot_3000.reachy_bridge.UrllibBridgeHttpClient", FakeDaemonHttp)
@@ -209,18 +277,38 @@ def test_reachy_daemon_http_adapter_uses_builtin_wake_up(monkeypatch):
 
     adapter.wake_up()
 
-    assert captured == {
-        "base_url": "http://reachy-mini.local:8000/",
-        "post": ("/api/move/play/wake_up", {}),
-    }
+    assert captured["base_url"] == "http://reachy-mini.local:8000/"
+    assert posts == [
+        ("/api/motors/set_mode/enabled", {}),
+        (
+            "/api/move/goto",
+            {
+                "head_pose": {
+                    "x": 0.0,
+                    "y": 0.0,
+                    "z": 0.0,
+                    "roll": 0.0,
+                    "pitch": 0.0,
+                    "yaw": 0.0,
+                },
+                "antennas": [0.0, 0.0],
+                "body_yaw": 0.0,
+                "duration": 2.0,
+                "interpolation": "cartoon",
+            },
+        ),
+    ]
 
 
 def test_reachy_mini_adapter_passes_sdk_connection_config(monkeypatch):
     captured: dict[str, object] = {}
 
     class FakeMini:
-        def wake_up(self) -> None:
-            captured["woke"] = True
+        def enable_motors(self) -> None:
+            captured["motors_enabled"] = True
+
+        def goto_target(self, **kwargs: object) -> None:
+            captured["goto"] = kwargs
 
     class FakeContext:
         def __enter__(self) -> FakeMini:
@@ -234,15 +322,65 @@ def test_reachy_mini_adapter_passes_sdk_connection_config(monkeypatch):
         return FakeContext()
 
     monkeypatch.setitem(sys.modules, "reachy_mini", SimpleNamespace(ReachyMini=fake_reachy_mini))
+    monkeypatch.setitem(
+        sys.modules,
+        "reachy_mini.reachy_mini",
+        SimpleNamespace(InterpolationTechnique=SimpleNamespace(CARTOON="cartoon")),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "reachy_mini.utils",
+        SimpleNamespace(create_head_pose=lambda **_kwargs: "ready-pose"),
+    )
 
     adapter = ReachyMiniAdapter(
-        ReachySdkConfig(connection_mode="network", media_backend="no_media", timeout_seconds=30.0)
+        ReachySdkConfig(
+            connection_mode="network",
+            host="10.0.0.39",
+            port=8000,
+            media_backend="no_media",
+            timeout_seconds=30.0,
+        )
     )
     adapter.wake_up()
     adapter.close()
 
+    goto = cast("dict[str, object]", captured["goto"])
     assert captured == {
-        "kwargs": {"connection_mode": "network", "media_backend": "no_media", "timeout": 30.0},
-        "woke": True,
+        "kwargs": {
+            "connection_mode": "network",
+            "host": "10.0.0.39",
+            "port": 8000,
+            "media_backend": "no_media",
+            "timeout": 30.0,
+        },
+        "motors_enabled": True,
+        "goto": goto,
         "closed": True,
     }
+    assert goto["head"] == "ready-pose"
+    assert goto["duration"] == 2.0
+
+
+def test_reachy_daemon_url_configures_sdk_network_address(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeReachyMiniAdapter:
+        def __init__(self, config: ReachySdkConfig) -> None:
+            captured["config"] = config
+
+    monkeypatch.setattr("pokerbot_3000.reachy_bridge.ReachyMiniAdapter", FakeReachyMiniAdapter)
+
+    adapter = _build_reachy_adapter(
+        argparse.Namespace(
+            console_only=False,
+            reachy_daemon_url="http://10.0.0.39:8000/",
+            reachy_connection_mode="auto",
+            reachy_media_backend="default",
+            reachy_timeout=15.0,
+        )
+    )
+
+    config = cast("ReachySdkConfig", captured["config"])
+    assert isinstance(adapter, FakeReachyMiniAdapter)
+    assert config == ReachySdkConfig(connection_mode="network", host="10.0.0.39", port=8000)

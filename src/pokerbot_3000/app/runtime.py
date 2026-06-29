@@ -24,8 +24,8 @@ from pokerbot_3000.voice import (
     ElevenLabsClient,
     ElevenLabsClientError,
     ElevenLabsConfig,
-    ParakeetSpeechTranscriber,
-    SileroVoiceActivityDetector,
+    ElevenLabsSpeechTranscriber,
+    EnergyVoiceActivityDetector,
     VoiceActionAdapters,
     VoiceActionCoordinator,
     VoiceInputStatus,
@@ -58,6 +58,9 @@ class SpeechSynthesisClient(Protocol):
 
     async def synthesize_eliza(self, text: str) -> bytes:
         """Synthesize Eliza speech."""
+
+    async def synthesize_reachy(self, text: str) -> bytes:
+        """Synthesize Reachy speech."""
 
 
 type VoiceClientFactory = Callable[[], SpeechSynthesisClient]
@@ -443,8 +446,8 @@ class DashboardRuntime:
             orchestrator=orchestrator,
             adapters=VoiceActionAdapters(
                 audio_input=browser_voice_input,
-                vad=SileroVoiceActivityDetector(),
-                transcriber=ParakeetSpeechTranscriber(),
+                vad=EnergyVoiceActivityDetector(),
+                transcriber=ElevenLabsSpeechTranscriber(),
                 parser=DeterministicVoiceCommandParser(),
             ),
             submit_table_talk=submit_table_talk,
@@ -530,6 +533,13 @@ class DashboardRuntime:
         status = self.voice_coordinator.status.model_dump()
         status["audio_source"] = "browser"
         status["browser_connected"] = bool(self.browser_voice_input and self.browser_voice_input.connected)
+        status["pending_audio_chunks"] = self.browser_voice_input.pending_chunk_count if self.browser_voice_input else 0
+        status["received_audio_chunks"] = (
+            self.browser_voice_input.submitted_chunk_count if self.browser_voice_input else 0
+        )
+        status["received_audio_bytes"] = (
+            self.browser_voice_input.submitted_byte_count if self.browser_voice_input else 0
+        )
         return status
 
     async def browser_voice_websocket_endpoint(self, websocket: WebSocket) -> None:
@@ -695,6 +705,16 @@ class DashboardRuntime:
             return self._audio_cache[cache_key]
         return await task
 
+    async def synthesize_reachy_event(self, event_id: str) -> bytes:
+        """Return MPEG audio for one queued Reachy speech event."""
+        cache_key = _audio_cache_key("reachy", event_id)
+        if cache_key in self._audio_cache:
+            return self._audio_cache[cache_key]
+        task = self._queue_reachy_synthesis(event_id)
+        if task is None:
+            return self._audio_cache[cache_key]
+        return await task
+
     def _queue_orchestrator_synthesis(self, event_id: str) -> asyncio.Task[bytes] | None:
         """Start synthesis for a speech event unless audio is already ready."""
         cache_key = _audio_cache_key("orchestrator", event_id)
@@ -717,6 +737,19 @@ class DashboardRuntime:
             return self._audio_tasks[cache_key]
 
         task = asyncio.create_task(self._synthesize_eliza_event(event_id))
+        self._audio_tasks[cache_key] = task
+        task.add_done_callback(lambda completed: self._finalize_audio_task(cache_key, completed))
+        return task
+
+    def _queue_reachy_synthesis(self, event_id: str) -> asyncio.Task[bytes] | None:
+        """Start Reachy speech synthesis unless audio is already ready."""
+        cache_key = _audio_cache_key("reachy", event_id)
+        if cache_key in self._audio_cache:
+            return None
+        if cache_key in self._audio_tasks:
+            return self._audio_tasks[cache_key]
+
+        task = asyncio.create_task(self._synthesize_reachy_event(event_id))
         self._audio_tasks[cache_key] = task
         task.add_done_callback(lambda completed: self._finalize_audio_task(cache_key, completed))
         return task
@@ -771,6 +804,29 @@ class DashboardRuntime:
         if self._voice_client is None:
             self._voice_client = self.voice_client_factory()
         audio = await self._voice_client.synthesize_eliza(speech)
+        self._audio_cache[cache_key] = audio
+        return audio
+
+    async def _synthesize_reachy_event(self, event_id: str) -> bytes:
+        """Synthesize and cache one Reachy speech event."""
+        cache_key = _audio_cache_key("reachy", event_id)
+        if cache_key in self._audio_cache:
+            return self._audio_cache[cache_key]
+
+        event = self.orchestrator.event_by_id(event_id)
+        if event is None or event.event_type != EventType.PRESENTATION_COMMAND:
+            msg = "Unknown Reachy speech event."
+            raise ElevenLabsClientError(msg)
+
+        speech = event.payload.get("speech")
+        target_client = event.payload.get("target_client")
+        if not isinstance(speech, str) or str(target_client) != ClientId.REACHY:
+            msg = "Event does not contain Reachy speech."
+            raise ElevenLabsClientError(msg)
+
+        if self._voice_client is None:
+            self._voice_client = self.voice_client_factory()
+        audio = await self._voice_client.synthesize_reachy(speech)
         self._audio_cache[cache_key] = audio
         return audio
 

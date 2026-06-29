@@ -917,6 +917,22 @@ class InMemoryOrchestrator:
             },
         )
 
+    def _queue_private_card_request(self, agent_id: str) -> GameEvent:
+        profile = self._agent_profiles[agent_id]
+        return self._append_event(
+            EventType.PRESENTATION_COMMAND,
+            source="orchestrator",
+            summary=f"Queued {profile.display_name} private-card capture command.",
+            payload={
+                "target_client": profile.client_id,
+                "intent": "request_private_cards",
+                "speech": None,
+                "emotion": "calm",
+                "gesture": "look_down",
+                "priority": "normal",
+            },
+        )
+
     def _pause_for_human_action(self, seat: int) -> None:
         self._state.waiting_for = PendingInput(
             type=PendingInputType.HUMAN_ACTION,
@@ -955,6 +971,7 @@ class InMemoryOrchestrator:
             f"{profile.display_name}, check your cards.",
             intent="request_private_cards",
         )
+        self._queue_private_card_request(agent_id)
 
     def _pause_for_agent_action(self, agent_id: str) -> None:
         profile = self._agent_profiles[agent_id]

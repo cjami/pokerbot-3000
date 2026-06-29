@@ -39,6 +39,7 @@ def create_api_router(runtime: DashboardRuntime) -> APIRouter:
     router.include_router(_create_game_router(runtime))
     router.include_router(_create_input_router(runtime))
     router.include_router(_create_vision_router(runtime))
+    router.include_router(_create_stale_voice_router())
     router.include_router(_create_voice_router(runtime))
     return router
 
@@ -152,6 +153,31 @@ def _create_voice_router(runtime: DashboardRuntime) -> APIRouter:
         except ElevenLabsClientError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         return Response(content=audio, media_type="audio/mpeg")
+
+    @router.get("/voice/reachy/{event_id}", response_class=Response)
+    async def get_reachy_voice(event_id: str) -> Response:
+        """Return generated ElevenLabs audio for one Reachy speech event."""
+        try:
+            audio = await runtime.synthesize_reachy_event(event_id)
+        except ElevenLabsConfigurationError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        except ElevenLabsClientError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        return Response(content=audio, media_type="audio/mpeg")
+
+    return router
+
+
+def _create_stale_voice_router() -> APIRouter:
+    router = APIRouter()
+
+    @router.post("/voice/transcript")
+    async def reject_stale_browser_transcript() -> None:
+        """Reject transcript posts from stale dashboard JavaScript bundles."""
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Stale dashboard JavaScript called removed /api/voice/transcript endpoint. Restart and reload.",
+        )
 
     return router
 

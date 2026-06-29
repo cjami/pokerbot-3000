@@ -34,21 +34,25 @@ CEREBRAS_MODEL=gemma-4-31b
 ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
 ELEVENLABS_ORCHESTRATOR_VOICE_ID=your_orchestrator_voice_id_here
 ELEVENLABS_ELIZA_VOICE_ID=your_eliza_voice_id_here
+ELEVENLABS_REACHY_VOICE_ID=your_reachy_voice_id_here
 ELEVENLABS_MODEL=eleven_flash_v2_5
 ELEVENLABS_ORCHESTRATOR_SPEED=0.82
 ELEVENLABS_ELIZA_SPEED=0.92
-POKERBOT_VOICE_MODEL=parakeet-tdt_ctc-110m
-POKERBOT_VAD_THRESHOLD=0.5
+ELEVENLABS_REACHY_SPEED=0.92
+ELEVENLABS_STT_MODEL=scribe_v1
+ELEVENLABS_STT_LANGUAGE=en
+POKERBOT_VAD_RMS_THRESHOLD=0.012
+POKERBOT_VAD_SILENCE_MS=650
 POKERBOT_VAD_MIN_PHRASE_MS=220
 POKERBOT_VAD_MAX_PHRASE_MS=8000
 ```
 
 The dashboard uses the browser camera API for public-board frames, so OBS Virtual Camera and other browser-visible devices can be selected directly in the app.
-Human voice input uses the browser microphone selector and streams 16 kHz mono PCM to the server-side Silero + Parakeet pipeline.
+Human voice input uses the browser microphone selector and streams 16 kHz mono PCM to the server-side energy VAD + ElevenLabs Scribe pipeline.
 Eliza's thin client is available at `http://127.0.0.1:8000/clients/eliza`.
 For another machine on the local network, start the app with `make app` and open `http://<host-ip>:8000/clients/eliza`.
 Chrome and Edge block camera access on insecure LAN origins by default; on the Eliza machine, open `chrome://flags/#unsafely-treat-insecure-origin-as-secure`, add `http://<host-ip>:8000`, enable the flag, and relaunch the browser.
-Reachy Mini can be connected with `uv run pokerbot-reachy-bridge`; install optional robot dependencies with `uv sync --extra reachy`.
+Reachy Mini can be connected with `make reachy-bridge`. By default this uses `http://reachy-mini.local:8000/`; override it with `make reachy-bridge REACHY_DAEMON_URL=http://10.0.0.39:8000/`.
 
 Check model access without starting the web server:
 
@@ -63,6 +67,7 @@ make test
 make lint
 make format
 make app
+make reachy-bridge
 ```
 
 Without Make:

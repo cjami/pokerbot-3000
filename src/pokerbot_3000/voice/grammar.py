@@ -115,7 +115,20 @@ def _parse_action(text: str) -> PokerAction | None:
     action: PokerAction | None = None
     if re.search(r"\ball\s+in\b", text):
         action = PokerAction(type=ActionType.ALL_IN)
-    elif (amount := _amount_after(text, (r"\braise\s+to\s+", r"\braise\s+", r"\bmake\s+it\s+"))) is not None:
+    elif (
+        amount := _amount_after(
+            text,
+            (
+                r"\braise\s+(?:it\s+)?to\s+",
+                r"\braised\s+(?:it\s+)?to\s+",
+                r"\braising\s+(?:it\s+)?to\s+",
+                r"\braise\s+",
+                r"\braised\s+",
+                r"\braising\s+",
+                r"\bmake\s+it\s+",
+            ),
+        )
+    ) is not None:
         action = PokerAction(type=ActionType.RAISE_TO, amount=amount)
     elif (amount := _amount_after(text, (r"\bbet\s+", r"\bwager\s+"))) is not None:
         action = PokerAction(type=ActionType.BET, amount=amount)
@@ -123,11 +136,11 @@ def _parse_action(text: str) -> PokerAction | None:
         action = PokerAction(type=ActionType.CALL, amount=amount)
     else:
         stripped = _strip_prefix(text)
-        if re.fullmatch(r"(?:fold|folding)", stripped):
+        if re.fullmatch(r"(?:fold|folding|folded)", stripped):
             action = PokerAction(type=ActionType.FOLD)
         elif re.fullmatch(r"(?:check|checking|check it)", stripped):
             action = PokerAction(type=ActionType.CHECK)
-        elif re.fullmatch(r"(?:call|calling|call it)", stripped):
+        elif re.fullmatch(r"(?:call|calling|called|call it)", stripped):
             action = PokerAction(type=ActionType.CALL)
     return action
 

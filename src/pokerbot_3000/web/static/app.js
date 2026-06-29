@@ -330,6 +330,15 @@ function renderVoiceInput(voiceInput) {
     "[data-voice-source]",
     voiceInput?.browser_connected ? "browser connected" : (voiceInput?.audio_source ?? "browser"),
   );
+  text("[data-voice-ready]", voiceInput?.transcriber_ready ? "ready" : "warming");
+  text(
+    "[data-voice-audio]",
+    `${voiceInput?.received_audio_chunks ?? 0} chunks, ${voiceInput?.pending_audio_chunks ?? 0} queued`,
+  );
+  text(
+    "[data-voice-segments]",
+    `${voiceInput?.speech_segment_count ?? 0} heard, ${voiceInput?.transcribed_segment_count ?? 0} transcribed`,
+  );
   text("[data-voice-transcript]", voiceInput?.latest_transcript ?? "none");
   text("[data-voice-action]", voiceActionLabel(voiceInput?.latest_action));
   text("[data-voice-issue]", voiceInput?.last_error ?? voiceInput?.last_rejection ?? "none");

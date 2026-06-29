@@ -78,6 +78,7 @@ def create_app(runtime: DashboardRuntime | None = None) -> FastAPI:
                 "players": sorted(state.players.items()),
                 "private_states": orchestrator.private_states().values(),
                 "state": state,
+                "static_version": _static_version(),
                 "voice_input": app_runtime.voice_status(),
             },
         )
@@ -94,7 +95,17 @@ def create_app(runtime: DashboardRuntime | None = None) -> FastAPI:
                 "app_name": "Eliza",
                 "client_id": ClientId.ELIZA,
                 "state": state,
+                "static_version": _static_version(),
             },
         )
 
     return app
+
+
+def _static_version() -> str:
+    newest_mtime = 0
+    for filename in ("app.js", "eliza.js", "styles.css"):
+        path = GENERATED_STATIC_DIR / filename
+        if path.exists():
+            newest_mtime = max(newest_mtime, int(path.stat().st_mtime))
+    return str(newest_mtime)

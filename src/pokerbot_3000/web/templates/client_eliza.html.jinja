@@ -7,8 +7,8 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Noto+Emoji:wght@300..700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="{{ request.url_for('static', path='styles.css') }}">
-    <script type="module" src="{{ request.url_for('static', path='eliza.js') }}"></script>
+    <link rel="stylesheet" href="{{ request.url_for('static', path='styles.css') }}?v={{ static_version }}">
+    <script type="module" src="{{ request.url_for('static', path='eliza.js') }}?v={{ static_version }}"></script>
   </head>
   <body class="min-h-screen bg-table text-ink antialiased" data-client-id="{{ client_id }}">
     <main class="client-shell">

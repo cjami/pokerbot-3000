@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import array
 import asyncio
 import importlib
+import logging
+import math
 import os
+import sys
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
@@ -15,15 +19,19 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 POKERBOT_VOICE_DEVICE_ENV: Final = "POKERBOT_VOICE_DEVICE"
-POKERBOT_VAD_THRESHOLD_ENV: Final = "POKERBOT_VAD_THRESHOLD"
+POKERBOT_VAD_RMS_THRESHOLD_ENV: Final = "POKERBOT_VAD_RMS_THRESHOLD"
 POKERBOT_VAD_MIN_PHRASE_MS_ENV: Final = "POKERBOT_VAD_MIN_PHRASE_MS"
 POKERBOT_VAD_MAX_PHRASE_MS_ENV: Final = "POKERBOT_VAD_MAX_PHRASE_MS"
+POKERBOT_VAD_SILENCE_MS_ENV: Final = "POKERBOT_VAD_SILENCE_MS"
 
 DEFAULT_SAMPLE_RATE: Final = 16_000
 DEFAULT_BLOCK_SIZE: Final = 512
-DEFAULT_VAD_THRESHOLD: Final = 0.5
+DEFAULT_VAD_RMS_THRESHOLD: Final = 0.012
 DEFAULT_MIN_PHRASE_MS: Final = 220
 DEFAULT_MAX_PHRASE_MS: Final = 8_000
+DEFAULT_SILENCE_MS: Final = 650
+
+LOGGER = logging.getLogger(__name__)
 
 
 class VoiceRuntimeError(RuntimeError):
@@ -50,19 +58,21 @@ class MicrophoneConfig:
 
 @dataclass(frozen=True, slots=True)
 class VadConfig:
-    """Silero phrase segmentation settings."""
+    """Voice phrase segmentation settings."""
 
-    threshold: float = DEFAULT_VAD_THRESHOLD
+    rms_threshold: float = DEFAULT_VAD_RMS_THRESHOLD
     min_phrase_ms: int = DEFAULT_MIN_PHRASE_MS
     max_phrase_ms: int = DEFAULT_MAX_PHRASE_MS
+    silence_ms: int = DEFAULT_SILENCE_MS
 
     @classmethod
     def from_env(cls) -> VadConfig:
         """Load VAD settings from environment variables."""
         return cls(
-            threshold=float(os.getenv(POKERBOT_VAD_THRESHOLD_ENV, DEFAULT_VAD_THRESHOLD)),
+            rms_threshold=float(os.getenv(POKERBOT_VAD_RMS_THRESHOLD_ENV, DEFAULT_VAD_RMS_THRESHOLD)),
             min_phrase_ms=int(os.getenv(POKERBOT_VAD_MIN_PHRASE_MS_ENV, DEFAULT_MIN_PHRASE_MS)),
             max_phrase_ms=int(os.getenv(POKERBOT_VAD_MAX_PHRASE_MS_ENV, DEFAULT_MAX_PHRASE_MS)),
+            silence_ms=int(os.getenv(POKERBOT_VAD_SILENCE_MS_ENV, DEFAULT_SILENCE_MS)),
         )
 
 
@@ -111,6 +121,8 @@ class BrowserAudioInput:
         self._queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=queue_size)
         self._sample_rate = sample_rate
         self._connection_count = 0
+        self._submitted_chunk_count = 0
+        self._submitted_byte_count = 0
 
     @property
     def connected(self) -> bool:
@@ -121,6 +133,16 @@ class BrowserAudioInput:
     def pending_chunk_count(self) -> int:
         """Return the number of queued browser audio chunks."""
         return self._queue.qsize()
+
+    @property
+    def submitted_chunk_count(self) -> int:
+        """Return the number of browser chunks received."""
+        return self._submitted_chunk_count
+
+    @property
+    def submitted_byte_count(self) -> int:
+        """Return the number of browser audio bytes received."""
+        return self._submitted_byte_count
 
     def connect(self) -> None:
         """Record a browser voice stream connection."""
@@ -134,6 +156,10 @@ class BrowserAudioInput:
         """Submit one 16 kHz mono PCM chunk from the browser."""
         if not pcm:
             return
+        self._submitted_chunk_count += 1
+        self._submitted_byte_count += len(pcm)
+        if self._submitted_chunk_count == 1:
+            LOGGER.info("Received first browser voice chunk (%d bytes).", len(pcm))
         _put_nowait_drop_oldest(self._queue, pcm)
 
     async def chunks(self) -> AsyncIterator[AudioChunk]:
@@ -142,55 +168,56 @@ class BrowserAudioInput:
             yield AudioChunk(pcm=await self._queue.get(), sample_rate=self._sample_rate)
 
 
-class SileroVoiceActivityDetector:
-    """Segment microphone chunks into speech phrases with Silero VAD."""
+class EnergyVoiceActivityDetector:
+    """Segment browser microphone chunks with RMS energy and trailing silence."""
 
     def __init__(self, config: VadConfig | None = None) -> None:
-        """Create a Silero-backed VAD adapter."""
+        """Create a lightweight phrase segmenter."""
         self._config = config or VadConfig.from_env()
 
     async def speech_segments(self, chunks: AsyncIterator[AudioChunk]) -> AsyncIterator[AudioChunk]:
-        """Yield full speech phrases from raw microphone chunks."""
-        try:
-            np = importlib.import_module("numpy")
-            torch = importlib.import_module("torch")
-            silero_vad = importlib.import_module("silero_vad")
-        except ImportError as exc:  # pragma: no cover - environment dependent
-            msg = "Install numpy, torch, and silero-vad to use voice activity detection."
-            raise VoiceRuntimeError(msg) from exc
-
-        model = silero_vad.load_silero_vad()
-        vad_iterator = silero_vad.VADIterator(
-            model,
-            threshold=self._config.threshold,
-            sampling_rate=DEFAULT_SAMPLE_RATE,
-        )
+        """Yield speech phrases when energy rises and then returns to silence."""
         phrase: list[bytes] = []
         in_speech = False
+        phrase_byte_count = 0
+        silence_byte_count = 0
         min_phrase_bytes = _millis_to_bytes(self._config.min_phrase_ms)
         max_phrase_bytes = _millis_to_bytes(self._config.max_phrase_ms)
+        silence_bytes = _millis_to_bytes(self._config.silence_ms)
 
         async for chunk in chunks:
             if chunk.sample_rate != DEFAULT_SAMPLE_RATE:
                 msg = f"Expected {DEFAULT_SAMPLE_RATE} Hz audio, received {chunk.sample_rate} Hz."
                 raise VoiceRuntimeError(msg)
 
-            samples = np.frombuffer(chunk.pcm, dtype=np.int16).astype(np.float32) / 32768.0
-            event = vad_iterator(torch.from_numpy(samples), return_seconds=False)
-            if event and "start" in event:
+            has_voice = _has_voice_energy(chunk.pcm, self._config.rms_threshold)
+            if has_voice:
+                if not in_speech:
+                    LOGGER.info("Voice activity started.")
+                    phrase = []
+                    phrase_byte_count = 0
+                    silence_byte_count = 0
                 in_speech = True
-                phrase = []
+                silence_byte_count = 0
+            elif in_speech:
+                silence_byte_count += len(chunk.pcm)
 
-            if in_speech:
-                phrase.append(chunk.pcm)
+            if not in_speech:
+                continue
 
-            phrase_bytes = b"".join(phrase)
-            should_end = bool(event and "end" in event) or len(phrase_bytes) >= max_phrase_bytes
-            if in_speech and should_end:
-                in_speech = False
-                if len(phrase_bytes) >= min_phrase_bytes:
-                    yield AudioChunk(pcm=phrase_bytes, sample_rate=chunk.sample_rate)
-                phrase = []
+            phrase.append(chunk.pcm)
+            phrase_byte_count += len(chunk.pcm)
+            should_end = silence_byte_count >= silence_bytes or phrase_byte_count >= max_phrase_bytes
+            if not should_end:
+                continue
+
+            in_speech = False
+            if phrase_byte_count >= min_phrase_bytes:
+                LOGGER.info("Voice phrase completed (%d bytes).", phrase_byte_count)
+                yield AudioChunk(pcm=b"".join(phrase), sample_rate=chunk.sample_rate)
+            phrase = []
+            phrase_byte_count = 0
+            silence_byte_count = 0
 
 
 def _put_nowait_drop_oldest(queue: asyncio.Queue[bytes], data: bytes) -> None:
@@ -203,3 +230,17 @@ def _put_nowait_drop_oldest(queue: asyncio.Queue[bytes], data: bytes) -> None:
 
 def _millis_to_bytes(milliseconds: int) -> int:
     return int(DEFAULT_SAMPLE_RATE * 2 * (milliseconds / 1000))
+
+
+def _has_voice_energy(pcm: bytes, rms_threshold: float) -> bool:
+    samples = array.array("h")
+    samples.frombytes(pcm)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    if not samples:
+        return False
+
+    peak = max(abs(sample) for sample in samples) / 32768.0
+    mean_square = sum(sample * sample for sample in samples) / len(samples)
+    rms = math.sqrt(mean_square) / 32768.0
+    return rms >= rms_threshold or peak >= max(0.08, rms_threshold * 4)

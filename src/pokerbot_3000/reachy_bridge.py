@@ -8,12 +8,15 @@ import importlib
 import json
 import math
 import sys
+import tempfile
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from io import BytesIO
+from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from pokerbot_3000.domain.models import ClientConnectionState
@@ -27,6 +30,7 @@ DEFAULT_REACHY_VOICE = "Aiden"
 DEFAULT_REACHY_CONNECTION_MODE = "auto"
 DEFAULT_REACHY_MEDIA_BACKEND = "default"
 DEFAULT_REACHY_TIMEOUT_SECONDS = 15.0
+DEFAULT_CAPTURE_SETTLE_SECONDS = 0.8
 
 ReachyConnectionMode = Literal["auto", "localhost_only", "network"]
 
@@ -41,6 +45,9 @@ class BridgeHttpClient(Protocol):
     def get_json(self, path: str) -> dict[str, Any] | list[dict[str, Any]]:
         """Return a JSON response from a GET request."""
 
+    def get_bytes(self, path: str) -> bytes:
+        """Return a binary response from a GET request."""
+
     def post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Return a JSON response from a POST request."""
 
@@ -54,7 +61,13 @@ class ReachyAdapter(Protocol):
     def capture_private_cards(self) -> str:
         """Return a JPEG or PNG data URI of Reachy's private cards."""
 
-    def perform(self, emotion: str, speech: str | None) -> None:
+    def perform(
+        self,
+        emotion: str,
+        speech: str | None,
+        voice_audio: bytes | None = None,
+        gesture: str | None = None,
+    ) -> None:
         """Perform one symbolic emotion and speech line."""
 
 
@@ -65,8 +78,8 @@ class BridgeConfig:
     base_url: str = DEFAULT_BASE_URL
     poll_seconds: float = DEFAULT_POLL_SECONDS
     source: str = DEFAULT_SOURCE
-    manual_confirm: bool = False
     wake_on_connect: bool = True
+    capture_settle_seconds: float = DEFAULT_CAPTURE_SETTLE_SECONDS
 
 
 class UrllibBridgeHttpClient:
@@ -83,6 +96,24 @@ class UrllibBridgeHttpClient:
             msg = "Expected JSON object or array response."
             raise BridgeError(msg)
         return cast("dict[str, Any] | list[dict[str, Any]]", response)
+
+    def get_bytes(self, path: str) -> bytes:
+        """Return bytes from a GET request."""
+        request = Request(  # noqa: S310
+            url=urljoin(self._base_url, path.lstrip("/")),
+            headers={"User-Agent": "pokerbot-reachy-bridge/0.1"},
+            method="GET",
+        )
+        try:
+            with urlopen(request, timeout=20.0) as response:  # noqa: S310
+                return response.read()
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            msg = f"Pokerbot API returned HTTP {exc.code}: {detail}"
+            raise BridgeError(msg) from exc
+        except URLError as exc:
+            msg = f"Could not reach Pokerbot API: {exc}"
+            raise BridgeError(msg) from exc
 
     def post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Return JSON from a POST request."""
@@ -124,10 +155,21 @@ class ConsoleReachyAdapter:
         msg = "Reachy SDK is not active; cannot capture private cards."
         raise BridgeError(msg)
 
-    def perform(self, emotion: str, speech: str | None) -> None:
+    def perform(
+        self,
+        emotion: str,
+        speech: str | None,
+        voice_audio: bytes | None = None,
+        gesture: str | None = None,
+    ) -> None:
         """Print presentation commands when no robot adapter is available."""
         line = speech or ""
-        print(f"Reachy presentation: emotion={emotion} voice={DEFAULT_REACHY_VOICE} speech={line}")
+        audio_label = f" audio_bytes={len(voice_audio)}" if voice_audio else ""
+        gesture_label = f" gesture={gesture}" if gesture else ""
+        print(
+            f"Reachy presentation: emotion={emotion}{gesture_label} "
+            f"voice={DEFAULT_REACHY_VOICE} speech={line}{audio_label}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +177,8 @@ class ReachySdkConfig:
     """Connection settings for the Reachy Mini Python SDK."""
 
     connection_mode: ReachyConnectionMode = DEFAULT_REACHY_CONNECTION_MODE
+    host: str = "reachy-mini.local"
+    port: int = 8000
     media_backend: str = DEFAULT_REACHY_MEDIA_BACKEND
     timeout_seconds: float = DEFAULT_REACHY_TIMEOUT_SECONDS
 
@@ -148,30 +192,44 @@ class ReachyMiniAdapter:
         try:
             reachy_module = importlib.import_module("reachy_mini")
         except ImportError as exc:
-            msg = "Install the Reachy extras with `uv sync --extra reachy` to use the robot bridge."
+            msg = (
+                "Run with `uv run --no-group voice --group reachy ...` "
+                "or sync `uv sync --no-group voice --group reachy` to use the robot bridge."
+            )
             raise BridgeError(msg) from exc
 
         self._context = reachy_module.ReachyMini(
             connection_mode=config.connection_mode,
+            host=config.host,
+            port=config.port,
             media_backend=config.media_backend,
             timeout=config.timeout_seconds,
         )
         self._mini = self._context.__enter__()
+        self._voice_file_paths: list[str] = []
 
     def close(self) -> None:
         """Release the SDK context."""
         self._context.__exit__(None, None, None)
+        for path in self._voice_file_paths:
+            with suppress(OSError):
+                Path(path).unlink()
+        self._voice_file_paths.clear()
 
     def wake_up(self) -> None:
-        """Run the SDK's built-in wake-up behavior."""
-        self._mini.wake_up()
+        """Enable motors and move Reachy into a visible upright posture."""
+        self._mini.enable_motors()
+        self._move("awake")
 
     def capture_private_cards(self) -> str:
         """Capture the current Reachy camera frame as a PNG data URI."""
         try:
             image_module = importlib.import_module("PIL.Image")
         except ImportError as exc:
-            msg = "Install the Reachy extras with `uv sync --extra reachy` to encode camera frames."
+            msg = (
+                "Run with `uv run --no-group voice --group reachy ...` "
+                "or sync `uv sync --no-group voice --group reachy` to encode camera frames."
+            )
             raise BridgeError(msg) from exc
 
         frame = self._mini.media.get_frame()
@@ -183,11 +241,27 @@ class ReachyMiniAdapter:
         encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
         return f"data:image/png;base64,{encoded}"
 
-    def perform(self, emotion: str, speech: str | None) -> None:
-        """Perform one symbolic movement and rely on Reachy's default voice path externally."""
-        self._move(emotion)
-        if speech:
+    def perform(
+        self,
+        emotion: str,
+        speech: str | None,
+        voice_audio: bytes | None = None,
+        gesture: str | None = None,
+    ) -> None:
+        """Perform one symbolic movement and play synthesized speech when available."""
+        self._move(gesture or emotion)
+        if voice_audio:
+            path = self._write_voice_audio(voice_audio)
+            self._mini.media.play_sound(path)
+        elif speech:
             print(f"Reachy voice ({DEFAULT_REACHY_VOICE}): {speech}")
+
+    def _write_voice_audio(self, audio: bytes) -> str:
+        with tempfile.NamedTemporaryFile(prefix="pokerbot_reachy_", suffix=".mp3", delete=False) as file:
+            file.write(audio)
+            path = file.name
+        self._voice_file_paths.append(path)
+        return path
 
     def _move(self, emotion: str) -> None:
         try:
@@ -224,14 +298,23 @@ class ReachyDaemonHttpAdapter:
         raise BridgeError(msg)
 
     def wake_up(self) -> None:
-        """Run the daemon's built-in wake-up behavior."""
-        self._http.post_json("/api/move/play/wake_up", {})
+        """Enable motors and move Reachy into a visible upright posture."""
+        self._http.post_json("/api/motors/set_mode/enabled", {})
+        self._http.post_json("/api/move/goto", _daemon_goto_payload(_movement_for_emotion("awake")))
 
-    def perform(self, emotion: str, speech: str | None) -> None:
+    def perform(
+        self,
+        emotion: str,
+        speech: str | None,
+        voice_audio: bytes | None = None,
+        gesture: str | None = None,
+    ) -> None:
         """Perform one symbolic movement through the daemon REST API."""
-        pose = _movement_for_emotion(emotion)
+        pose = _movement_for_emotion(gesture or emotion)
         self._http.post_json("/api/move/goto", _daemon_goto_payload(pose))
-        if speech:
+        if voice_audio:
+            print(f"Reachy voice ({DEFAULT_REACHY_VOICE}): {speech or ''} audio_bytes={len(voice_audio)}")
+        elif speech:
             print(f"Reachy voice ({DEFAULT_REACHY_VOICE}): {speech}")
 
 
@@ -249,10 +332,12 @@ class MovementPose:
 
 def _movement_for_emotion(emotion: str) -> MovementPose:
     poses = {
+        "awake": MovementPose(0, 0, 0, 0, 0, duration=2.0),
         "calm": MovementPose(5, 0, 20, 20, 0),
         "confident": MovementPose(12, -8, 45, 45, 12),
         "celebrate": MovementPose(15, 10, 70, 70, -15, duration=1.0),
         "confused": MovementPose(4, 18, 15, 55, 0),
+        "look_down": MovementPose(-18, 0, 10, 10, 0, duration=1.0),
         "sad": MovementPose(-8, 0, -20, -20, 0),
     }
     return poses.get(emotion, poses["confused"])
@@ -283,6 +368,8 @@ class ReachyBridge:
     http: BridgeHttpClient
     reachy: ReachyAdapter
     seen_event_ids: set[str] = field(default_factory=set)
+    failed_private_capture_keys: set[str] = field(default_factory=set)
+    submitted_private_capture_keys: set[str] = field(default_factory=set)
 
     def start(self) -> None:
         """Run the bridge until interrupted."""
@@ -298,17 +385,8 @@ class ReachyBridge:
 
     def tick(self) -> None:
         """Run one polling iteration."""
-        state = self._state()
-        self._maybe_capture_private_cards(state)
         for event in self._events():
             self._maybe_perform_event(event)
-
-    def _state(self) -> dict[str, Any]:
-        state = self.http.get_json("/api/state")
-        if not isinstance(state, dict):
-            msg = "Expected state response to be a JSON object."
-            raise BridgeError(msg)
-        return state
 
     def _events(self) -> list[dict[str, Any]]:
         events = self.http.get_json("/api/events?limit=25")
@@ -317,15 +395,14 @@ class ReachyBridge:
             raise BridgeError(msg)
         return events
 
-    def _maybe_capture_private_cards(self, state: dict[str, Any]) -> None:
-        waiting_for = state.get("waiting_for")
-        if not isinstance(waiting_for, dict):
+    def _capture_private_cards_for_event(self, event_id: str) -> None:
+        if event_id in self.submitted_private_capture_keys:
             return
-        if waiting_for.get("type") != "private_cards" or waiting_for.get("agent_id") != REACHY_CLIENT_ID:
+        try:
+            data_uri = self.reachy.capture_private_cards()
+        except BridgeError as exc:
+            self._post_private_capture_error(event_id, str(exc))
             return
-        if self.config.manual_confirm:
-            input("Show Reachy's cards, then press Enter to capture.")
-        data_uri = self.reachy.capture_private_cards()
         result = self.http.post_json(
             f"/api/clients/{REACHY_CLIENT_ID}/private-cards/frame",
             {"source": self.config.source, "data_uri": data_uri},
@@ -336,6 +413,14 @@ class ReachyBridge:
                 "Reachy private-card frame rejected",
                 str(result.get("reason")),
             )
+            return
+        self.submitted_private_capture_keys.add(event_id)
+
+    def _post_private_capture_error(self, event_id: str, detail: str) -> None:
+        if event_id in self.failed_private_capture_keys:
+            return
+        self.failed_private_capture_keys.add(event_id)
+        self._post_status(ClientConnectionState.ERROR, "Reachy private-card capture unavailable", detail)
 
     def _maybe_perform_event(self, event: dict[str, Any]) -> None:
         event_id = event.get("event_id")
@@ -345,7 +430,25 @@ class ReachyBridge:
         if event_id in self.seen_event_ids or payload.get("target_client") != REACHY_CLIENT_ID:
             return
         self.seen_event_ids.add(event_id)
-        self.reachy.perform(str(payload.get("emotion") or "calm"), _optional_string(payload.get("speech")))
+        speech = _optional_string(payload.get("speech"))
+        gesture = _optional_string(payload.get("gesture"))
+        voice_audio = self._voice_audio(event_id) if speech else None
+        self.reachy.perform(
+            str(payload.get("emotion") or "calm"),
+            speech,
+            voice_audio,
+            gesture,
+        )
+        if payload.get("intent") == "request_private_cards":
+            time.sleep(self.config.capture_settle_seconds)
+            self._capture_private_cards_for_event(event_id)
+
+    def _voice_audio(self, event_id: str) -> bytes | None:
+        try:
+            return self.http.get_bytes(f"/api/voice/{REACHY_CLIENT_ID}/{event_id}")
+        except BridgeError as exc:
+            self._post_status(ClientConnectionState.ERROR, "Reachy voice playback unavailable", str(exc))
+            return None
 
     def _post_status(self, connection: ClientConnectionState, status: str, detail: str | None = None) -> None:
         self.http.post_json(
@@ -361,7 +464,6 @@ def main(argv: list[str] | None = None) -> None:
         base_url=args.base_url,
         poll_seconds=args.poll_seconds,
         source=args.source,
-        manual_confirm=args.manual_confirm,
         wake_on_connect=args.wake_on_connect,
     )
     adapter = _build_reachy_adapter(args)
@@ -381,7 +483,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--reachy-daemon-url",
         help=(
-            "Reachy Mini wireless daemon URL. When set, the bridge uses the daemon REST API instead of SDK/Zenoh."
+            "Reachy Mini daemon URL used to configure the SDK host and port, for example "
+            "http://reachy-mini.local:8000/."
         ),
     )
     parser.add_argument(
@@ -401,9 +504,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=float,
         help="Reachy SDK connection timeout in seconds.",
     )
-    capture_mode = parser.add_mutually_exclusive_group()
-    capture_mode.add_argument("--auto-capture", action="store_true", help="Capture as soon as the orchestrator asks.")
-    capture_mode.add_argument("--manual-confirm", action="store_true", help="Prompt before capturing private cards.")
     parser.add_argument(
         "--no-wake-on-connect",
         action="store_false",
@@ -417,15 +517,31 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 def _build_reachy_adapter(args: argparse.Namespace) -> ReachyAdapter:
     if args.console_only:
         return ConsoleReachyAdapter()
-    if args.reachy_daemon_url:
-        return ReachyDaemonHttpAdapter(str(args.reachy_daemon_url))
+    host, port = _parse_reachy_daemon_address(args.reachy_daemon_url or DEFAULT_REACHY_DAEMON_URL)
+    connection_mode = cast("ReachyConnectionMode", args.reachy_connection_mode)
+    if args.reachy_daemon_url and connection_mode == "auto":
+        connection_mode = "network"
     return ReachyMiniAdapter(
         ReachySdkConfig(
-            connection_mode=cast("ReachyConnectionMode", args.reachy_connection_mode),
+            connection_mode=connection_mode,
+            host=host,
+            port=port,
             media_backend=args.reachy_media_backend,
             timeout_seconds=args.reachy_timeout,
         )
     )
+
+
+def _parse_reachy_daemon_address(daemon_url: str) -> tuple[str, int]:
+    parsed = urlparse(daemon_url)
+    if parsed.scheme and parsed.scheme not in {"http", "https"}:
+        msg = "Reachy daemon URL must use http or https."
+        raise BridgeError(msg)
+    host = parsed.hostname or parsed.path
+    if not host:
+        msg = "Reachy daemon URL must include a host."
+        raise BridgeError(msg)
+    return host, parsed.port or 8000
 
 
 def _optional_string(value: object) -> str | None:

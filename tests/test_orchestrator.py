@@ -94,13 +94,29 @@ def test_orchestrator_prompts_agents_to_check_private_cards():
         for event in reachy_result.events
         if event.event_type == EventType.PRESENTATION_COMMAND and event.payload.get("voice") == "orchestrator"
     ]
+    reachy_commands = [
+        event.payload
+        for event in reachy_result.events
+        if event.event_type == EventType.PRESENTATION_COMMAND
+        and event.payload.get("target_client") == "reachy"
+        and event.payload.get("intent") == "request_private_cards"
+    ]
     eliza_speech = [
         event.payload.get("speech")
         for event in eliza_result.events
         if event.event_type == EventType.PRESENTATION_COMMAND and event.payload.get("voice") == "orchestrator"
     ]
+    eliza_commands = [
+        event.payload
+        for event in eliza_result.events
+        if event.event_type == EventType.PRESENTATION_COMMAND
+        and event.payload.get("target_client") == "eliza"
+        and event.payload.get("intent") == "request_private_cards"
+    ]
     assert "Reachy, check your cards." in reachy_speech
+    assert len(reachy_commands) == 1
     assert "Eliza, check your cards." in eliza_speech
+    assert len(eliza_commands) == 1
 
 
 def test_orchestrator_commits_flop_then_pauses_for_first_postflop_agent_action():

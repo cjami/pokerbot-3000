@@ -110,6 +110,10 @@ class FakeVoiceClient:
         """Return fake MPEG bytes for an Eliza speech line."""
         return f"eliza:{text}".encode()
 
+    async def synthesize_reachy(self, text: str) -> bytes:
+        """Return fake MPEG bytes for a Reachy speech line."""
+        return f"reachy:{text}".encode()
+
 
 class RecordingVoiceClient:
     """Voice fake that records synthesis requests."""
@@ -127,6 +131,11 @@ class RecordingVoiceClient:
         """Record the requested Eliza speech and return fake MPEG bytes."""
         self.calls.append(f"eliza:{text}")
         return f"eliza:{text}".encode()
+
+    async def synthesize_reachy(self, text: str) -> bytes:
+        """Record the requested Reachy speech and return fake MPEG bytes."""
+        self.calls.append(f"reachy:{text}")
+        return f"reachy:{text}".encode()
 
 
 class FakeAgentDecisions:
@@ -250,7 +259,7 @@ def test_index_renders_starter_page():
     assert "Pokerbot 3000" in response.text
     assert "Table Camera" in response.text
     assert "/static/styles.css" in response.text
-    assert "/static/app.js" in response.text
+    assert "/static/app.js?v=" in response.text
 
 
 def test_eliza_client_page_renders_thin_client_assets():
@@ -261,7 +270,7 @@ def test_eliza_client_page_renders_thin_client_assets():
     assert response.status_code == 200
     assert "Eliza" in response.text
     assert "Noto+Emoji" in response.text
-    assert "/static/eliza.js" in response.text
+    assert "/static/eliza.js?v=" in response.text
 
 
 def test_missing_static_file_returns_not_found():
@@ -270,6 +279,15 @@ def test_missing_static_file_returns_not_found():
     response = client.get("/static/missing.css")
 
     assert response.status_code == 404
+
+
+def test_removed_voice_transcript_endpoint_identifies_stale_browser_bundle():
+    client = TestClient(create_app(build_test_runtime()))
+
+    response = client.post("/api/voice/transcript", json={"text": "call"})
+
+    assert response.status_code == 410
+    assert "Stale dashboard JavaScript" in response.json()["detail"]
 
 
 def test_api_state_returns_public_game_snapshot():
@@ -558,6 +576,8 @@ def test_voice_websocket_queues_browser_pcm_chunks():
             time.sleep(0.01)
 
     assert runtime.browser_voice_input.pending_chunk_count == 1
+    assert runtime.browser_voice_input.submitted_chunk_count == 1
+    assert runtime.browser_voice_input.submitted_byte_count == 1024
     assert runtime.browser_voice_input.connected is False
 
 
@@ -585,6 +605,7 @@ def test_eliza_voice_endpoint_returns_agent_audio_for_targeted_presentation_even
         event
         for event in runtime.orchestrator.events()
         if event.event_type == "presentation_command" and event.payload.get("target_client") == "eliza"
+        and isinstance(event.payload.get("speech"), str)
     )
 
     response = client.get(f"/api/voice/eliza/{event.event_id}")
@@ -592,6 +613,25 @@ def test_eliza_voice_endpoint_returns_agent_audio_for_targeted_presentation_even
     assert response.status_code == 200
     assert response.headers["content-type"] == "audio/mpeg"
     assert response.content.startswith(b"eliza:")
+
+
+def test_reachy_voice_endpoint_returns_agent_audio_for_targeted_presentation_event():
+    runtime = build_test_runtime()
+    client = TestClient(create_app(runtime))
+    client.post("/api/game/start")
+    _open_human_action_after_flop(runtime.orchestrator)
+    event = next(
+        event
+        for event in runtime.orchestrator.events()
+        if event.event_type == "presentation_command" and event.payload.get("target_client") == "reachy"
+        and isinstance(event.payload.get("speech"), str)
+    )
+
+    response = client.get(f"/api/voice/reachy/{event.event_id}")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "audio/mpeg"
+    assert response.content.startswith(b"reachy:")
 
 
 def test_public_board_frame_submission_advances_recognition_from_browser_image():

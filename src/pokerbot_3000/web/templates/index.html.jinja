@@ -4,8 +4,8 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ app_name }}</title>
-    <link rel="stylesheet" href="{{ request.url_for('static', path='styles.css') }}">
-    <script type="module" src="{{ request.url_for('static', path='app.js') }}"></script>
+    <link rel="stylesheet" href="{{ request.url_for('static', path='styles.css') }}?v={{ static_version }}">
+    <script type="module" src="{{ request.url_for('static', path='app.js') }}?v={{ static_version }}"></script>
   </head>
   <body class="min-h-screen bg-table text-ink antialiased">
     <main class="dashboard-shell">
@@ -271,6 +271,24 @@
               <div class="row-stat">
                 <dt>Source</dt>
                 <dd data-voice-source>{{ voice_input.audio_source or "browser" }}</dd>
+              </div>
+              <div class="row-stat">
+                <dt>ASR</dt>
+                <dd data-voice-ready>{{ "ready" if voice_input.transcriber_ready else "warming" }}</dd>
+              </div>
+              <div class="row-stat">
+                <dt>Audio</dt>
+                <dd data-voice-audio>
+                  {{ voice_input.received_audio_chunks or 0 }} chunks,
+                  {{ voice_input.pending_audio_chunks or 0 }} queued
+                </dd>
+              </div>
+              <div class="row-stat">
+                <dt>Segments</dt>
+                <dd data-voice-segments>
+                  {{ voice_input.speech_segment_count or 0 }} heard,
+                  {{ voice_input.transcribed_segment_count or 0 }} transcribed
+                </dd>
               </div>
               <div class="row-stat">
                 <dt>Transcript</dt>

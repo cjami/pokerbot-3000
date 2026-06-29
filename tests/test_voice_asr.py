@@ -1,72 +1,123 @@
 import asyncio
-import types
+from collections.abc import Mapping
 
 import pytest
 
 from pokerbot_3000.ports.voice import AudioChunk
 from pokerbot_3000.voice import (
-    DEFAULT_PARAKEET_MODEL,
-    LEGACY_UNIFIED_PARAKEET_MODEL,
-    POKERBOT_VOICE_MODEL_ENV,
-    ParakeetConfig,
-    ParakeetSpeechTranscriber,
+    DEFAULT_ELEVENLABS_STT_LANGUAGE,
+    DEFAULT_ELEVENLABS_STT_MODEL,
+    ELEVENLABS_API_KEY_ENV,
+    ELEVENLABS_STT_LANGUAGE_ENV,
+    ELEVENLABS_STT_MODEL_ENV,
+    ElevenLabsSpeechTranscriber,
+    ElevenLabsSpeechTranscriptionConfig,
     VoiceRuntimeError,
 )
+from pokerbot_3000.voice.asr import _wav_bytes
+from pokerbot_3000.voice.elevenlabs import ELEVENLABS_BASE_URL_ENV
 
 
-class _FakeAsrModel:
+class _RecordingSpeechToTextTransport:
     def __init__(self) -> None:
-        self.model_names: list[str] = []
+        self.calls: list[tuple[str, bytes, Mapping[str, str], float]] = []
+        self.result: Mapping[str, object] = {"text": "check"}
 
-    def from_pretrained(self, *, model_name: str) -> "_LoadedModel":
-        self.model_names.append(model_name)
-        return _LoadedModel()
-
-
-class _LoadedModel:
-    def transcribe(self, paths: list[str]) -> list[str]:
-        assert len(paths) == 1
-        return ["check"]
-
-
-def test_parakeet_config_uses_registered_model_by_default(monkeypatch):
-    monkeypatch.delenv(POKERBOT_VOICE_MODEL_ENV, raising=False)
-
-    assert ParakeetConfig.from_env().model_name == DEFAULT_PARAKEET_MODEL
+    def __call__(
+        self,
+        url: str,
+        body: bytes,
+        headers: Mapping[str, str],
+        timeout: float,
+    ) -> Mapping[str, object]:
+        self.calls.append((url, body, headers, timeout))
+        return self.result
 
 
-def test_parakeet_config_maps_old_unified_model_to_registered_model(monkeypatch):
-    monkeypatch.setenv(POKERBOT_VOICE_MODEL_ENV, LEGACY_UNIFIED_PARAKEET_MODEL)
+def test_elevenlabs_stt_config_uses_default_model_and_language(monkeypatch):
+    monkeypatch.setenv(ELEVENLABS_API_KEY_ENV, "test-key")
+    monkeypatch.delenv(ELEVENLABS_STT_MODEL_ENV, raising=False)
+    monkeypatch.delenv(ELEVENLABS_STT_LANGUAGE_ENV, raising=False)
 
-    assert ParakeetConfig.from_env().model_name == DEFAULT_PARAKEET_MODEL
+    config = ElevenLabsSpeechTranscriptionConfig.from_env()
+
+    assert config.model == DEFAULT_ELEVENLABS_STT_MODEL
+    assert config.language == DEFAULT_ELEVENLABS_STT_LANGUAGE
 
 
-def test_parakeet_loader_passes_configured_model_to_nemo(monkeypatch):
-    fake_model = _FakeAsrModel()
-    fake_nemo = types.SimpleNamespace(models=types.SimpleNamespace(ASRModel=fake_model))
-    monkeypatch.setattr("pokerbot_3000.voice.asr.importlib.import_module", lambda _name: fake_nemo)
+def test_elevenlabs_stt_config_reads_model_and_language_from_env(monkeypatch):
+    monkeypatch.setenv(ELEVENLABS_API_KEY_ENV, "test-key")
+    monkeypatch.setenv(ELEVENLABS_STT_MODEL_ENV, "scribe-custom")
+    monkeypatch.setenv(ELEVENLABS_STT_LANGUAGE_ENV, "en")
+    monkeypatch.setenv(ELEVENLABS_BASE_URL_ENV, "https://example.test/v1")
 
-    transcript = asyncio.run(
-        ParakeetSpeechTranscriber(ParakeetConfig(model_name="custom-model")).transcribe(AudioChunk(pcm=b"\0\0"))
+    config = ElevenLabsSpeechTranscriptionConfig.from_env()
+
+    assert config.model == "scribe-custom"
+    assert config.language == "en"
+    assert config.base_url == "https://example.test/v1/"
+
+
+def test_elevenlabs_transcriber_posts_wav_to_speech_to_text():
+    transport = _RecordingSpeechToTextTransport()
+    transcriber = ElevenLabsSpeechTranscriber(
+        ElevenLabsSpeechTranscriptionConfig(api_key="test-key", model="scribe-custom", language="en"),
+        transport=transport,
     )
 
+    transcript = asyncio.run(transcriber.transcribe(AudioChunk(pcm=b"\0\0")))
+
     assert transcript.text == "check"
-    assert fake_model.model_names == ["custom-model"]
+    assert len(transport.calls) == 1
+    url, body, headers, timeout = transport.calls[0]
+    assert url == "https://api.elevenlabs.io/v1/speech-to-text"
+    assert timeout == 20.0
+    assert headers["xi-api-key"] == "test-key"
+    assert headers["Accept"] == "application/json"
+    assert "multipart/form-data; boundary=" in headers["Content-Type"]
+
+    assert b'name="model_id"\r\n\r\nscribe-custom' in body
+    assert b'name="language_code"\r\n\r\nen' in body
+    assert b'name="file"; filename="speech.wav"' in body
+    assert b"RIFF" in body
+    assert b"WAVE" in body
 
 
-def test_parakeet_loader_explains_conformer_config_mismatch(monkeypatch):
-    class BrokenAsrModel:
-        def from_pretrained(self, *, model_name: str) -> object:
-            _ = model_name
-            msg = "ConformerEncoder.__init__() got an unexpected keyword argument 'att_chunk_context_size'"
-            raise TypeError(msg)
+def test_elevenlabs_transcriber_extracts_text_from_tuple_wrapped_chunks():
+    transport = _RecordingSpeechToTextTransport()
+    transport.result = {"chunks": ({"text": ""}, {"text": "call"})}
+    transcriber = ElevenLabsSpeechTranscriber(
+        ElevenLabsSpeechTranscriptionConfig(api_key="test-key"),
+        transport=transport,
+    )
 
-    fake_nemo = types.SimpleNamespace(models=types.SimpleNamespace(ASRModel=BrokenAsrModel()))
-    monkeypatch.setattr("pokerbot_3000.voice.asr.importlib.import_module", lambda _name: fake_nemo)
+    transcript = asyncio.run(transcriber.transcribe(AudioChunk(pcm=b"\0\0")))
 
-    with pytest.raises(VoiceRuntimeError) as exc_info:
-        asyncio.run(ParakeetSpeechTranscriber(ParakeetConfig(model_name="newer-model")).transcribe(AudioChunk(pcm=b"")))
+    assert transcript.text == "call"
 
-    message = str(exc_info.value)
-    assert "newer-model" in message
-    assert f"{POKERBOT_VOICE_MODEL_ENV}={DEFAULT_PARAKEET_MODEL}" in message
+
+def test_elevenlabs_stt_can_disable_language_field():
+    transport = _RecordingSpeechToTextTransport()
+    transcriber = ElevenLabsSpeechTranscriber(
+        ElevenLabsSpeechTranscriptionConfig(api_key="test-key", language=None),
+        transport=transport,
+    )
+
+    asyncio.run(transcriber.transcribe(AudioChunk(pcm=b"\0\0")))
+
+    assert b'name="language_code"' not in transport.calls[0][1]
+
+
+def test_wav_writer_rejects_non_16_bit_pcm():
+    with pytest.raises(VoiceRuntimeError, match="Expected 16-bit PCM"):
+        _wav_bytes(AudioChunk(pcm=b"\0", sample_width=1))
+
+
+def test_elevenlabs_transcriber_loads_lazy_config_from_env(monkeypatch):
+    monkeypatch.setenv(ELEVENLABS_API_KEY_ENV, "env-key")
+    monkeypatch.setenv(ELEVENLABS_STT_MODEL_ENV, "scribe-env")
+    transport = _RecordingSpeechToTextTransport()
+
+    asyncio.run(ElevenLabsSpeechTranscriber(transport=transport).transcribe(AudioChunk(pcm=b"\0\0")))
+
+    assert b'name="model_id"\r\n\r\nscribe-env' in transport.calls[0][1]
