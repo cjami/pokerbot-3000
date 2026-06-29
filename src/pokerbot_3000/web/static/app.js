@@ -195,39 +195,42 @@ function renderSeats(state) {
     article.className = Number(seat) === state.active_player_seat ? "seat-panel seat-panel-active" : "seat-panel";
 
     const header = document.createElement("div");
-    header.className = "flex items-start justify-between gap-3";
+    header.className = "seat-summary";
 
     const identity = document.createElement("div");
     const seatLabel = document.createElement("p");
-    seatLabel.className = "text-sm font-semibold text-neutral-600";
+    seatLabel.className = "seat-label";
     seatLabel.textContent = `S${seat}`;
     const name = document.createElement("h3");
-    name.className = "text-xl font-black";
     name.textContent = player.name;
     identity.append(seatLabel, name);
     header.append(identity);
+
+    const badges = document.createElement("div");
+    badges.className = "seat-badges";
 
     if (Number(seat) === state.dealer_seat) {
       const dealer = document.createElement("span");
       dealer.className = "dealer-button";
       dealer.textContent = "D";
-      header.append(dealer);
+      badges.append(dealer);
     }
     if (Number(seat) === state.small_blind_seat) {
       const blind = document.createElement("span");
       blind.className = "blind-badge";
       blind.textContent = "SB";
-      header.append(blind);
+      badges.append(blind);
     }
     if (Number(seat) === state.big_blind_seat) {
       const blind = document.createElement("span");
       blind.className = "blind-badge";
       blind.textContent = "BB";
-      header.append(blind);
+      badges.append(blind);
     }
+    header.append(badges);
 
     const stats = document.createElement("dl");
-    stats.className = "mt-4 grid gap-2 text-sm";
+    stats.className = "seat-stats";
     stats.append(
       rowStat("Status", player.status),
       rowStat("Stack", String(player.stack)),

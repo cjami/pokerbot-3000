@@ -17,63 +17,79 @@
 
 @layer components {
   .action-chip {
-    @apply rounded border border-felt/30 bg-felt/10 px-3 py-2 text-sm font-bold text-felt;
+    @apply rounded border border-felt/25 bg-felt/8 px-3 py-1.5 text-sm font-bold text-felt;
   }
 
   .card-row {
-    @apply flex min-h-24 flex-wrap items-center gap-3 rounded border border-neutral-200 bg-white p-3;
+    @apply flex min-h-22 flex-wrap items-center gap-2 rounded border border-neutral-200 bg-white p-3;
+  }
+
+  .card-row-compact {
+    @apply min-h-16 border-neutral-200 bg-neutral-50/70 p-2;
   }
 
   .camera-preview {
-    @apply aspect-video w-full rounded border border-neutral-200 bg-neutral-100 object-contain;
+    @apply aspect-video h-full w-full rounded bg-neutral-950 object-contain;
   }
 
   .camera-stage {
-    @apply relative mb-3 overflow-hidden rounded;
+    @apply relative aspect-video min-h-64 overflow-hidden rounded border border-neutral-300 bg-neutral-950 shadow-sm lg:min-h-[34rem];
+  }
+
+  .camera-stage::before {
+    @apply pointer-events-none absolute inset-0 z-10 rounded border border-white/10 content-[''];
+  }
+
+  .camera-toolbar {
+    @apply grid max-w-5xl gap-3 border-b border-neutral-200 pb-4 pt-3;
   }
 
   .zone-box {
-    @apply absolute rounded border-2 border-signal bg-signal/15 text-xs font-black uppercase text-white shadow-sm;
+    @apply absolute rounded border-2 border-signal bg-signal/20 text-xs font-black uppercase text-white shadow-sm;
   }
 
   .zone-box span {
-    @apply absolute left-1 top-1 rounded bg-ink/80 px-1 py-0.5;
+    @apply absolute left-1 top-1 rounded bg-ink/85 px-1.5 py-0.5;
   }
 
   .zone-box-active {
-    @apply border-clay bg-clay/15;
+    @apply border-clay bg-clay/20;
   }
 
   .zone-controls {
-    @apply mb-3 grid gap-2 sm:grid-cols-[1fr_auto];
+    @apply grid items-end gap-2 sm:grid-cols-[1fr_auto];
   }
 
   .zone-controls label {
-    @apply grid gap-1 text-xs font-bold uppercase tracking-[0.08em] text-neutral-600;
+    @apply grid gap-1 text-xs font-bold uppercase tracking-[0.08em] text-neutral-500;
   }
 
   .zone-controls select {
-    @apply rounded border border-neutral-300 bg-white px-3 py-2 text-sm font-bold normal-case tracking-normal text-neutral-800;
+    @apply h-10 rounded border border-neutral-300 bg-white px-3 text-sm font-bold normal-case tracking-normal text-neutral-800 outline-none;
   }
 
   .zone-overlay {
-    @apply absolute inset-0 cursor-crosshair rounded;
+    @apply absolute inset-0 z-20 cursor-crosshair rounded;
   }
 
   .camera-controls {
-    @apply mb-2 grid gap-2 sm:grid-cols-[1fr_auto];
+    @apply grid items-end gap-2 sm:grid-cols-[1fr_auto];
   }
 
   .camera-controls label {
-    @apply grid gap-1 text-xs font-bold uppercase tracking-[0.08em] text-neutral-600;
+    @apply grid gap-1 text-xs font-bold uppercase tracking-[0.08em] text-neutral-500;
   }
 
   .camera-controls select {
-    @apply rounded border border-neutral-300 bg-white px-3 py-2 text-sm font-bold normal-case tracking-normal text-neutral-800;
+    @apply h-10 rounded border border-neutral-300 bg-white px-3 text-sm font-bold normal-case tracking-normal text-neutral-800 outline-none;
   }
 
   .camera-status {
-    @apply mb-3 min-h-5 text-sm font-semibold text-neutral-600;
+    @apply min-h-5 text-sm font-semibold text-neutral-600;
+  }
+
+  .camera-workspace {
+    @apply rounded-lg border border-neutral-300 bg-white p-3 shadow-sm sm:p-4;
   }
 
   .client-actions {
@@ -122,19 +138,87 @@
   }
 
   .control-button {
-    @apply rounded border border-neutral-300 bg-white px-4 py-2 text-sm font-black uppercase tracking-[0.08em] text-neutral-700 shadow-sm;
+    @apply h-10 rounded border border-neutral-300 bg-white px-4 text-sm font-black uppercase tracking-[0.08em] text-neutral-700 shadow-sm transition hover:border-neutral-400 hover:bg-neutral-50 disabled:cursor-wait disabled:opacity-60;
   }
 
   .control-button-primary {
-    @apply border-felt bg-felt text-white;
+    @apply border-felt bg-felt text-white hover:border-felt hover:bg-felt/95;
+  }
+
+  .dashboard-header {
+    @apply grid gap-4 rounded-lg border border-neutral-300 bg-white/85 p-4 shadow-sm lg:grid-cols-[1fr_auto_1.9fr] lg:items-center;
+  }
+
+  .dashboard-metrics {
+    @apply grid grid-cols-2 gap-2 text-sm sm:grid-cols-5 lg:justify-end;
+  }
+
+  .dashboard-primary {
+    @apply grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem];
+  }
+
+  .dashboard-shell {
+    @apply mx-auto flex min-h-screen w-full max-w-[96rem] flex-col gap-4 px-4 py-4 sm:px-6 lg:px-8;
+  }
+
+  .dashboard-title p {
+    @apply text-xs font-bold uppercase tracking-[0.18em] text-felt;
+  }
+
+  .dashboard-title h1 {
+    @apply mt-1 text-2xl font-black leading-tight sm:text-3xl;
+  }
+
+  .detected-cards {
+    @apply grid gap-2;
   }
 
   .dealer-button {
-    @apply grid size-8 place-items-center rounded-full border border-clay bg-white text-sm font-black text-clay;
+    @apply grid size-7 place-items-center rounded-full border border-clay bg-white text-xs font-black text-clay;
+  }
+
+  .diagnostic-body {
+    @apply mt-3 grid gap-3;
+  }
+
+  .diagnostic-panel {
+    @apply p-0;
+  }
+
+  .diagnostic-panel summary {
+    @apply flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-sm font-black uppercase tracking-[0.1em] text-neutral-700;
+  }
+
+  .diagnostic-panel summary::-webkit-details-marker {
+    @apply hidden;
+  }
+
+  .diagnostic-panel summary::after {
+    @apply text-neutral-400 content-['+'];
+  }
+
+  .diagnostic-panel[open] summary {
+    @apply border-b border-neutral-200;
+  }
+
+  .diagnostic-panel[open] summary::after {
+    @apply content-['-'];
+  }
+
+  .diagnostic-panel .diagnostic-body {
+    @apply px-4 pb-4;
+  }
+
+  .diagnostic-stats {
+    @apply grid gap-2 text-sm sm:grid-cols-2;
+  }
+
+  .diagnostics-grid {
+    @apply grid gap-3 lg:grid-cols-4;
   }
 
   .blind-badge {
-    @apply grid size-8 place-items-center rounded-full border border-neutral-300 bg-neutral-100 text-xs font-black text-neutral-700;
+    @apply grid size-7 place-items-center rounded-full border border-neutral-300 bg-neutral-100 text-[0.68rem] font-black text-neutral-700;
   }
 
   .empty-state {
@@ -146,7 +230,7 @@
   }
 
   .event-list li {
-    @apply grid gap-2 py-3 sm:grid-cols-[11rem_1fr_5rem];
+    @apply grid gap-2 py-2.5 sm:grid-cols-[11rem_1fr_5rem];
   }
 
   .event-list span {
@@ -159,57 +243,130 @@
 
   .is-ready {
     border-color: rgb(23 107 77 / 45%);
+    background: rgb(23 107 77 / 8%);
   }
 
   .metric {
-    @apply min-w-24 rounded border border-neutral-300 bg-white px-3 py-2;
+    @apply min-w-0 rounded border border-neutral-200 bg-neutral-50 px-3 py-2;
+  }
+
+  .metric strong {
+    @apply block truncate text-base font-black;
   }
 
   .metric-label {
-    @apply block text-xs font-semibold uppercase tracking-[0.12em] text-neutral-500;
+    @apply block text-[0.68rem] font-semibold uppercase tracking-[0.12em] text-neutral-500;
   }
 
   .panel {
     @apply rounded-lg border border-neutral-300 bg-white p-4 shadow-sm;
   }
 
+  .panel-tight {
+    @apply p-3;
+  }
+
   .panel-heading {
-    @apply mb-4 flex flex-wrap items-center justify-between gap-3;
+    @apply mb-3 flex flex-wrap items-center justify-between gap-3;
   }
 
   .panel-heading h2 {
-    @apply text-base font-black uppercase tracking-[0.12em] text-neutral-700;
+    @apply text-sm font-black uppercase tracking-[0.12em] text-neutral-700;
   }
 
   .playing-card {
-    @apply grid h-20 w-14 place-items-center rounded border border-neutral-300 bg-white text-xl font-black shadow-sm;
+    @apply grid h-16 w-12 place-items-center rounded border border-neutral-300 bg-white px-1 text-center text-sm font-black leading-tight shadow-sm;
+  }
+
+  .rail-stats {
+    @apply mt-3 grid gap-2 text-sm;
+  }
+
+  .recognition-strip {
+    @apply grid gap-3 pt-4;
   }
 
   .row-stat {
-    @apply flex items-center justify-between gap-3 rounded border border-neutral-200 px-3 py-2;
+    @apply flex min-w-0 items-center justify-between gap-3 rounded border border-neutral-200 bg-white px-3 py-2;
   }
 
   .row-stat dt {
-    @apply font-semibold text-neutral-500;
+    @apply shrink-0 font-semibold text-neutral-500;
   }
 
   .row-stat dd {
-    @apply font-bold;
+    @apply min-w-0 truncate text-right font-bold;
+  }
+
+  .seat-badges {
+    @apply flex shrink-0 items-center gap-1;
+  }
+
+  .seat-label {
+    @apply text-xs font-semibold uppercase tracking-[0.1em] text-neutral-500;
   }
 
   .seat-panel {
-    @apply rounded-lg border border-neutral-200 bg-white p-4;
+    @apply rounded border border-neutral-200 bg-white p-3;
   }
 
   .seat-panel-active {
-    @apply border-felt bg-felt/5;
+    @apply border-felt bg-felt/5 shadow-sm;
+  }
+
+  .seat-panel h3 {
+    @apply truncate text-lg font-black leading-tight;
+  }
+
+  .seat-stack {
+    @apply grid gap-2;
+  }
+
+  .seat-stats {
+    @apply mt-3 grid gap-2 text-sm;
+  }
+
+  .seat-summary {
+    @apply flex items-start justify-between gap-3;
+  }
+
+  .section-kicker {
+    @apply text-xs font-bold uppercase tracking-[0.14em] text-felt;
+  }
+
+  .strip-label {
+    @apply text-xs font-bold uppercase tracking-[0.12em] text-neutral-500;
   }
 
   .status-pill {
-    @apply rounded border border-neutral-300 bg-neutral-50 px-2 py-1 text-xs font-bold uppercase tracking-[0.08em] text-neutral-600;
+    @apply inline-flex min-h-7 max-w-full items-center rounded border border-neutral-300 bg-neutral-50 px-2 py-1 text-xs font-bold uppercase tracking-[0.08em] text-neutral-600;
   }
 
   .status-row {
-    @apply flex min-h-16 items-center justify-between gap-3 rounded border border-neutral-200 px-3 py-2;
+    @apply flex min-h-14 items-center justify-between gap-3 rounded border border-neutral-200 bg-white px-3 py-2;
+  }
+
+  .table-rail {
+    @apply grid content-start gap-4;
+  }
+
+  .uncertainty-list {
+    @apply list-disc space-y-1 pl-5 text-sm text-neutral-600;
+  }
+
+  .workspace-status {
+    @apply flex flex-wrap items-center gap-2;
+  }
+
+  .workspace-topline {
+    @apply mb-3 flex flex-wrap items-end justify-between gap-3;
+  }
+
+  .workspace-topline h2 {
+    @apply text-2xl font-black leading-tight sm:text-3xl;
+  }
+
+  .chip-row {
+    @apply flex flex-wrap gap-2;
   }
 }

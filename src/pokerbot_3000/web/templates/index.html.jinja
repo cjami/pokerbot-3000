@@ -8,17 +8,17 @@
     <script type="module" src="{{ request.url_for('static', path='app.js') }}"></script>
   </head>
   <body class="min-h-screen bg-table text-ink antialiased">
-    <main class="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
-      <header class="flex flex-wrap items-end justify-between gap-4 border-b border-neutral-300 pb-4">
-        <div>
-          <p class="text-sm font-semibold uppercase tracking-[0.18em] text-felt">Python orchestrator</p>
-          <h1 class="mt-1 text-3xl font-black leading-tight sm:text-4xl">{{ app_name }}</h1>
+    <main class="dashboard-shell">
+      <header class="dashboard-header">
+        <div class="dashboard-title">
+          <p>Python orchestrator</p>
+          <h1>{{ app_name }}</h1>
         </div>
         <div class="control-bar" aria-label="Game controls">
           <button class="control-button control-button-primary" type="button" data-game-control="start">Start</button>
           <button class="control-button" type="button" data-game-control="stop">Stop</button>
         </div>
-        <div class="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
+        <div class="dashboard-metrics" aria-label="Current game status">
           <div class="metric">
             <span class="metric-label">Hand</span>
             <strong data-hand-id>{{ state.hand_id }}</strong>
@@ -35,111 +35,23 @@
             <span class="metric-label">Waiting</span>
             <strong data-waiting>{{ state.waiting_for.type if state.waiting_for else "none" }}</strong>
           </div>
+          <span data-api-status class="status-pill">API pending</span>
         </div>
       </header>
 
-      <section class="grid gap-4 lg:grid-cols-[1.5fr_1fr]">
-        <div class="panel">
-          <div class="panel-heading">
-            <h2>Table State</h2>
-            <span data-api-status class="status-pill">API pending</span>
+      <section class="dashboard-primary">
+        <div class="camera-workspace">
+          <div class="workspace-topline">
+            <div>
+              <p class="section-kicker">Recognition workspace</p>
+              <h2>Table Camera</h2>
+            </div>
+            <div class="workspace-status">
+              <span class="status-pill" data-recognition-status>{{ state.board_recognition.status }}</span>
+              <span class="camera-status" data-camera-status>Camera idle</span>
+            </div>
           </div>
-          <div class="grid gap-3 md:grid-cols-3" data-seat-grid>
-            {% for seat, player in players %}
-              <article class="seat-panel{% if seat == state.active_player_seat %} seat-panel-active{% endif %}">
-                <div class="flex items-start justify-between gap-3">
-                  <div>
-                    <p class="text-sm font-semibold text-neutral-600">S{{ seat }}</p>
-                    <h3 class="text-xl font-black">{{ player.name }}</h3>
-                  </div>
-                  {% if seat == state.dealer_seat %}
-                    <span class="dealer-button">D</span>
-                  {% endif %}
-                  {% if seat == state.small_blind_seat %}
-                    <span class="blind-badge">SB</span>
-                  {% endif %}
-                  {% if seat == state.big_blind_seat %}
-                    <span class="blind-badge">BB</span>
-                  {% endif %}
-                </div>
-                <dl class="mt-4 grid gap-2 text-sm">
-                  <div class="row-stat">
-                    <dt>Status</dt>
-                    <dd>{{ player.status }}</dd>
-                  </div>
-                  <div class="row-stat">
-                    <dt>Stack</dt>
-                    <dd>{{ player.stack }}</dd>
-                  </div>
-                  <div class="row-stat">
-                    <dt>Committed</dt>
-                    <dd>{{ player.committed_this_street }}</dd>
-                  </div>
-                  <div class="row-stat">
-                    <dt>Hand</dt>
-                    <dd>{{ player.committed_this_hand }}</dd>
-                  </div>
-                </dl>
-              </article>
-            {% endfor %}
-          </div>
-        </div>
 
-        <aside class="panel">
-          <div class="panel-heading">
-            <h2>Board</h2>
-            <span class="status-pill" data-board-source>{{ state.board_source }}</span>
-          </div>
-          <div class="card-row" data-board-row>
-            {% if state.board %}
-              {% for card in state.board %}
-                <span class="playing-card">{{ card.label }}</span>
-              {% endfor %}
-            {% else %}
-              <span class="empty-state">No board cards recognised</span>
-            {% endif %}
-          </div>
-          <dl class="mt-4 grid gap-2 text-sm">
-            <div class="row-stat">
-              <dt>Engine</dt>
-              <dd data-engine-status>{{ state.automation_status }}</dd>
-            </div>
-            <div class="row-stat">
-              <dt>Active seat</dt>
-              <dd data-active-seat>S{{ state.active_player_seat }}</dd>
-            </div>
-            <div class="row-stat">
-              <dt>Paused for</dt>
-              <dd data-waiting-reason>{{ state.waiting_for.reason if state.waiting_for else "none" }}</dd>
-            </div>
-            <div class="row-stat">
-              <dt>To call</dt>
-              <dd data-to-call>{{ state.active_to_call }}</dd>
-            </div>
-            <div class="row-stat">
-              <dt>Min raise</dt>
-              <dd data-min-raise>{{ state.min_raise_to }}</dd>
-            </div>
-          </dl>
-        </aside>
-      </section>
-
-      <section class="grid gap-4 lg:grid-cols-3">
-        <div class="panel">
-          <div class="panel-heading">
-            <h2>Public Recognition</h2>
-            <span class="status-pill" data-recognition-status>{{ state.board_recognition.status }}</span>
-          </div>
-          <form class="camera-controls" data-camera-form>
-            <label>
-              <span>Camera</span>
-              <select data-camera-device>
-                <option value="">Default camera</option>
-              </select>
-            </label>
-            <button class="control-button" type="submit">Use</button>
-          </form>
-          <p class="camera-status" data-camera-status>Camera idle</p>
           <div class="camera-stage" data-camera-stage>
             <video
               class="camera-preview"
@@ -151,28 +63,184 @@
             ></video>
             <div class="zone-overlay" data-zone-overlay></div>
           </div>
-          <form class="zone-controls" data-zone-form>
-            <label>
-              <span>Zone</span>
-              <select data-zone-select>
-                <option value="board">Board</option>
-                <option value="seat_1">Seat 1</option>
-                <option value="seat_2">Seat 2</option>
-                <option value="seat_3">Seat 3</option>
-              </select>
-            </label>
-            <button class="control-button" type="button" data-zone-clear>Clear</button>
-          </form>
-          <div class="card-row" data-detected-board>
-            {% if state.board_recognition.latest_observation and state.board_recognition.latest_observation.board_cards %}
-              {% for card in state.board_recognition.latest_observation.board_cards %}
-                <span class="playing-card">{{ card.label }}</span>
-              {% endfor %}
-            {% else %}
-              <span class="empty-state">No detection yet</span>
-            {% endif %}
+
+          <div class="camera-toolbar">
+            <form class="camera-controls" data-camera-form>
+              <label>
+                <span>Camera</span>
+                <select data-camera-device>
+                  <option value="">Default camera</option>
+                </select>
+              </label>
+              <button class="control-button" type="submit">Use</button>
+            </form>
+            <form class="camera-controls" data-voice-form>
+              <label>
+                <span>Microphone</span>
+                <select data-voice-device>
+                  <option value="">Default microphone</option>
+                </select>
+              </label>
+              <button class="control-button" type="submit" data-voice-toggle>Use</button>
+            </form>
+            <form class="zone-controls" data-zone-form>
+              <label>
+                <span>Zone</span>
+                <select data-zone-select>
+                  <option value="board">Board</option>
+                  <option value="seat_1">Seat 1</option>
+                  <option value="seat_2">Seat 2</option>
+                  <option value="seat_3">Seat 3</option>
+                </select>
+              </label>
+              <button class="control-button" type="button" data-zone-clear>Clear</button>
+            </form>
           </div>
-          <dl class="mt-4 grid gap-2 text-sm">
+
+          <div class="recognition-strip">
+            <div class="detected-cards">
+              <span class="strip-label">Detected</span>
+              <div class="card-row card-row-compact" data-detected-board>
+                {% if state.board_recognition.latest_observation and state.board_recognition.latest_observation.board_cards %}
+                  {% for card in state.board_recognition.latest_observation.board_cards %}
+                    <span class="playing-card">{{ card.label }}</span>
+                  {% endfor %}
+                {% else %}
+                  <span class="empty-state">No detection yet</span>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <aside class="table-rail">
+          <section class="panel panel-tight">
+            <div class="panel-heading">
+              <h2>Live Table</h2>
+              <span class="status-pill" data-board-source>{{ state.board_source }}</span>
+            </div>
+            <div class="card-row" data-board-row>
+              {% if state.board %}
+                {% for card in state.board %}
+                  <span class="playing-card">{{ card.label }}</span>
+                {% endfor %}
+              {% else %}
+                <span class="empty-state">No board cards recognised</span>
+              {% endif %}
+            </div>
+            <dl class="rail-stats">
+              <div class="row-stat">
+                <dt>Engine</dt>
+                <dd data-engine-status>{{ state.automation_status }}</dd>
+              </div>
+              <div class="row-stat">
+                <dt>Active</dt>
+                <dd data-active-seat>S{{ state.active_player_seat }}</dd>
+              </div>
+              <div class="row-stat">
+                <dt>Paused</dt>
+                <dd data-waiting-reason>{{ state.waiting_for.reason if state.waiting_for else "none" }}</dd>
+              </div>
+              <div class="row-stat">
+                <dt>To call</dt>
+                <dd data-to-call>{{ state.active_to_call }}</dd>
+              </div>
+              <div class="row-stat">
+                <dt>Min raise</dt>
+                <dd data-min-raise>{{ state.min_raise_to }}</dd>
+              </div>
+            </dl>
+          </section>
+
+          <section class="panel panel-tight">
+            <div class="panel-heading">
+              <h2>Seats</h2>
+            </div>
+            <div class="seat-stack" data-seat-grid>
+              {% for seat, player in players %}
+                <article class="seat-panel{% if seat == state.active_player_seat %} seat-panel-active{% endif %}">
+                  <div class="seat-summary">
+                    <div>
+                      <p class="seat-label">S{{ seat }}</p>
+                      <h3>{{ player.name }}</h3>
+                    </div>
+                    <div class="seat-badges">
+                      {% if seat == state.dealer_seat %}
+                        <span class="dealer-button">D</span>
+                      {% endif %}
+                      {% if seat == state.small_blind_seat %}
+                        <span class="blind-badge">SB</span>
+                      {% endif %}
+                      {% if seat == state.big_blind_seat %}
+                        <span class="blind-badge">BB</span>
+                      {% endif %}
+                    </div>
+                  </div>
+                  <dl class="seat-stats">
+                    <div class="row-stat">
+                      <dt>Status</dt>
+                      <dd>{{ player.status }}</dd>
+                    </div>
+                    <div class="row-stat">
+                      <dt>Stack</dt>
+                      <dd>{{ player.stack }}</dd>
+                    </div>
+                    <div class="row-stat">
+                      <dt>Committed</dt>
+                      <dd>{{ player.committed_this_street }}</dd>
+                    </div>
+                    <div class="row-stat">
+                      <dt>Hand</dt>
+                      <dd>{{ player.committed_this_hand }}</dd>
+                    </div>
+                  </dl>
+                </article>
+              {% endfor %}
+            </div>
+          </section>
+        </aside>
+      </section>
+
+      <section class="diagnostics-grid" aria-label="Diagnostics">
+        <details class="panel diagnostic-panel">
+          <summary>
+            <span>Private Recognition</span>
+          </summary>
+          <div class="diagnostic-body" data-private-recognition>
+            {% for private_state in private_states %}
+              <div class="status-row">
+                <div>
+                  <p class="font-bold">{{ private_state.agent_id|title }}</p>
+                  <p class="text-sm text-neutral-600">S{{ private_state.seat }} - {{ private_state.hole_cards|length }}/2 cards</p>
+                </div>
+                <span class="status-pill">{{ "%.0f"|format(private_state.confidence * 100) }}%</span>
+              </div>
+            {% endfor %}
+          </div>
+        </details>
+
+        <details class="panel diagnostic-panel">
+          <summary>
+            <span>Clients</span>
+          </summary>
+          <div class="diagnostic-body" data-clients>
+            {% for client in client_statuses %}
+              <div class="status-row">
+                <div>
+                  <p class="font-bold">{{ client.client_id|replace("_", " ")|title }}</p>
+                  <p class="text-sm text-neutral-600">{{ client.status }}</p>
+                </div>
+                <span class="status-pill">{{ client.connection }}</span>
+              </div>
+            {% endfor %}
+          </div>
+        </details>
+
+        <details class="panel diagnostic-panel">
+          <summary>
+            <span>Recognition Details</span>
+          </summary>
+          <dl class="diagnostic-body diagnostic-stats">
             <div class="row-stat">
               <dt>Expected</dt>
               <dd data-recognition-expected>{{ state.board_recognition.expected_card_count or "none" }}</dd>
@@ -190,9 +258,67 @@
               <dd data-recognition-error>{{ state.board_recognition.last_error or "none" }}</dd>
             </div>
           </dl>
-          <dl class="mt-4 grid gap-2 text-sm">
+        </details>
+
+        <details class="panel diagnostic-panel">
+          <summary>
+            <span>Voice Details</span>
+            <span class="status-pill" data-voice-state>{{ voice_input.state }}</span>
+          </summary>
+          <div class="diagnostic-body">
+            <p class="camera-status" data-voice-browser-status>Microphone idle</p>
+            <dl class="diagnostic-stats">
+              <div class="row-stat">
+                <dt>Source</dt>
+                <dd data-voice-source>{{ voice_input.audio_source or "browser" }}</dd>
+              </div>
+              <div class="row-stat">
+                <dt>Transcript</dt>
+                <dd data-voice-transcript>{{ voice_input.latest_transcript or "none" }}</dd>
+              </div>
+              <div class="row-stat">
+                <dt>Action</dt>
+                <dd data-voice-action>
+                  {% if voice_input.latest_action %}
+                    {{ voice_input.latest_action.type }}{% if voice_input.latest_action.amount %} {{ voice_input.latest_action.amount }}{% endif %}
+                  {% else %}
+                    none
+                  {% endif %}
+                </dd>
+              </div>
+              <div class="row-stat">
+                <dt>Issue</dt>
+                <dd data-voice-issue>{{ voice_input.last_error or voice_input.last_rejection or "none" }}</dd>
+              </div>
+            </dl>
+          </div>
+        </details>
+
+        <details class="panel diagnostic-panel">
+          <summary>
+            <span>Actions</span>
+          </summary>
+          <div class="diagnostic-body">
+            <div class="chip-row" data-legal-actions>
+              {% for action in state.legal_actions %}
+                <span class="action-chip">{{ action }}</span>
+              {% endfor %}
+            </div>
+            <ul class="uncertainty-list" data-uncertainties>
+              {% for uncertainty in state.uncertainties %}
+                <li>{{ uncertainty }}</li>
+              {% endfor %}
+            </ul>
+          </div>
+        </details>
+
+        <details class="panel diagnostic-panel lg:col-span-2">
+          <summary>
+            <span>Showdown</span>
+          </summary>
+          <dl class="diagnostic-body diagnostic-stats">
             <div class="row-stat">
-              <dt>Showdown</dt>
+              <dt>Status</dt>
               <dd data-showdown-status>{{ state.showdown.status }}</dd>
             </div>
             <div class="row-stat">
@@ -204,117 +330,23 @@
               <dd data-showdown-winner>{{ state.showdown.winner_seats|join(", ") if state.showdown.winner_seats else "none" }}</dd>
             </div>
           </dl>
-        </div>
+        </details>
 
-        <div class="panel">
-          <div class="panel-heading">
-            <h2>Private Recognition</h2>
-          </div>
-          <div class="space-y-3" data-private-recognition>
-            {% for private_state in private_states %}
-              <div class="status-row">
-                <div>
-                  <p class="font-bold">{{ private_state.agent_id|title }}</p>
-                  <p class="text-sm text-neutral-600">S{{ private_state.seat }} - {{ private_state.hole_cards|length }}/2 cards</p>
-                </div>
-                <span class="status-pill">{{ "%.0f"|format(private_state.confidence * 100) }}%</span>
-              </div>
+        <details class="panel diagnostic-panel lg:col-span-2">
+          <summary>
+            <span>Event Log</span>
+            <span class="status-pill">{{ events|length }} shown</span>
+          </summary>
+          <ol class="event-list diagnostic-body" data-event-list>
+            {% for event in events|reverse %}
+              <li>
+                <span>{{ event.event_type }}</span>
+                <strong>{{ event.summary }}</strong>
+                <time>{{ event.created_at.strftime("%H:%M:%S") }}</time>
+              </li>
             {% endfor %}
-          </div>
-        </div>
-
-        <div class="panel">
-          <div class="panel-heading">
-            <h2>Clients</h2>
-          </div>
-          <div class="space-y-3" data-clients>
-            {% for client in client_statuses %}
-              <div class="status-row">
-                <div>
-                  <p class="font-bold">{{ client.client_id|replace("_", " ")|title }}</p>
-                  <p class="text-sm text-neutral-600">{{ client.status }}</p>
-                </div>
-                <span class="status-pill">{{ client.connection }}</span>
-              </div>
-            {% endfor %}
-          </div>
-        </div>
-
-        <div class="panel">
-          <div class="panel-heading">
-            <h2>Voice Input</h2>
-            <span class="status-pill" data-voice-state>{{ voice_input.state }}</span>
-          </div>
-          <form class="camera-controls" data-voice-form>
-            <label>
-              <span>Microphone</span>
-              <select data-voice-device>
-                <option value="">Default microphone</option>
-              </select>
-            </label>
-            <button class="control-button" type="submit" data-voice-toggle>Use</button>
-          </form>
-          <p class="camera-status" data-voice-browser-status>Microphone idle</p>
-          <dl class="grid gap-2 text-sm">
-            <div class="row-stat">
-              <dt>Source</dt>
-              <dd data-voice-source>{{ voice_input.audio_source or "browser" }}</dd>
-            </div>
-            <div class="row-stat">
-              <dt>Transcript</dt>
-              <dd data-voice-transcript>{{ voice_input.latest_transcript or "none" }}</dd>
-            </div>
-            <div class="row-stat">
-              <dt>Action</dt>
-              <dd data-voice-action>
-                {% if voice_input.latest_action %}
-                  {{ voice_input.latest_action.type }}{% if voice_input.latest_action.amount %} {{ voice_input.latest_action.amount }}{% endif %}
-                {% else %}
-                  none
-                {% endif %}
-              </dd>
-            </div>
-            <div class="row-stat">
-              <dt>Issue</dt>
-              <dd data-voice-issue>{{ voice_input.last_error or voice_input.last_rejection or "none" }}</dd>
-            </div>
-          </dl>
-        </div>
-
-        <div class="panel">
-          <div class="panel-heading">
-            <h2>Legal Actions</h2>
-          </div>
-          <div class="flex flex-wrap gap-2" data-legal-actions>
-            {% for action in state.legal_actions %}
-              <span class="action-chip">{{ action }}</span>
-            {% endfor %}
-          </div>
-          <div class="mt-4 border-t border-neutral-200 pt-4">
-            <p class="text-sm font-bold text-neutral-700">Known gaps</p>
-            <ul class="mt-2 space-y-1 text-sm text-neutral-600" data-uncertainties>
-              {% for uncertainty in state.uncertainties %}
-                <li>{{ uncertainty }}</li>
-              {% endfor %}
-            </ul>
-          </div>
-        </div>
-      </section>
-
-      <section class="panel flex-1">
-        <div class="panel-heading">
-          <h2>Event Log</h2>
-          <span class="status-pill">{{ events|length }} shown</span>
-        </div>
-        <ol class="event-list" data-event-list>
-          {% for event in events|reverse %}
-            <li>
-              <span>{{ event.event_type }}</span>
-              <strong>{{ event.summary }}</strong>
-              <time>{{ event.created_at.strftime("%H:%M:%S") }}</time>
-            </li>
-          {% endfor %}
-        </ol>
+          </ol>
+        </details>
       </section>
     </main>
   </body>
