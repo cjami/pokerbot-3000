@@ -16,9 +16,11 @@ from pokerbot_3000.app.runtime import (
 from pokerbot_3000.app.server import create_app
 from pokerbot_3000.domain.cards import Card
 from pokerbot_3000.domain.models import (
+    ClientId,
     GameEvent,
     HumanActionInput,
     HumanTableTalkInput,
+    PendingInputType,
     PokerAction,
     PrivateAgentState,
     PrivateCardObservation,
@@ -481,6 +483,80 @@ def test_runtime_table_talk_blocks_human_action_until_speech_completes():
     assert "agent_decision" in {event["event_type"] for event in payload["events"]}
     assert payload["state"]["waiting_for"]["type"] == "presentation"
     assert payload["state"]["waiting_for"]["agent_id"] == "reachy"
+
+
+def test_runtime_voice_capture_gate_closes_during_blocking_table_talk_response(monkeypatch):
+    now = 100.0
+    monkeypatch.setattr("pokerbot_3000.app.runtime.time.monotonic", lambda: now)
+    runtime = build_test_runtime(agent_banter_source=FakeAgentBanter())
+    client = TestClient(create_app(runtime))
+    client.post("/api/game/start")
+
+    table_talk = client.post(
+        "/api/inputs/human-table-talk",
+        json={
+            "source": "voice",
+            "target_agent_id": "eliza",
+            "message": "are you nervous",
+            "raw_transcript": "Eliza, are you nervous?",
+            "confidence": 0.95,
+        },
+    )
+    presentation = next(
+        event for event in table_talk.json()["events"] if event["event_type"] == "presentation_command"
+    )
+
+    assert runtime.voice_capture_suppression_reason() == "agent speech is still playing"
+
+    client.post(f"/api/presentation/{presentation['event_id']}/complete")
+
+    assert runtime.voice_capture_suppression_reason() == "agent speech just finished"
+
+    now = 102.0
+
+    assert runtime.voice_capture_suppression_reason() is None
+
+
+def test_runtime_voice_capture_gate_stays_closed_after_river_agent_handoff():
+    runtime = build_test_runtime()
+    client = TestClient(create_app(runtime))
+    client.post("/api/game/start")
+    _open_human_action_after_flop(runtime.orchestrator)
+    runtime.orchestrator.submit_human_action(HumanActionInput.model_validate({"action": {"type": "check"}}))
+    turn = [_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs"), _card("king", "spades")]
+    for _ in range(2):
+        runtime.orchestrator.record_public_observation(
+            PublicTableObservation(board_cards=turn, street_hint=Street.TURN, confidence=0.9)
+        )
+    _submit_agent_decision_and_complete(runtime.orchestrator, _decision("reachy", "check"))
+    _submit_agent_decision_and_complete(runtime.orchestrator, _decision("eliza", "check"))
+    runtime.orchestrator.submit_human_action(HumanActionInput.model_validate({"action": {"type": "check"}}))
+    river = [*turn, _card("9", "spades")]
+    for _ in range(2):
+        runtime.orchestrator.record_public_observation(
+            PublicTableObservation(board_cards=river, street_hint=Street.RIVER, confidence=0.9)
+        )
+
+    reachy_events = asyncio.run(runtime.process_pending_agent_actions())
+    reachy_presentation = next(
+        event
+        for event in reachy_events
+        if event.event_type == "presentation_command" and event.payload.get("target_client") == ClientId.REACHY
+    )
+    eliza_events = asyncio.run(runtime.complete_presentation(reachy_presentation.event_id))
+    eliza_presentation = next(
+        event
+        for event in eliza_events
+        if event.event_type == "presentation_command" and event.payload.get("target_client") == ClientId.ELIZA
+    )
+
+    handoff_events = asyncio.run(runtime.complete_presentation(eliza_presentation.event_id))
+
+    assert any(event.payload.get("intent") == "action_handoff" for event in handoff_events)
+    waiting_for = runtime.orchestrator.public_state().waiting_for
+    assert waiting_for is not None
+    assert waiting_for.type == PendingInputType.HUMAN_ACTION
+    assert runtime.voice_capture_suppression_reason() == "agent speech just finished"
 
 
 def test_runtime_human_action_reaction_does_not_block_agent_decisions():

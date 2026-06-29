@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -48,6 +49,8 @@ if TYPE_CHECKING:
 type DashboardMessage = dict[str, Any]
 type SnapshotFactory = Callable[[], DashboardMessage]
 type EventHook = Callable[[list[GameEvent]], Awaitable[None]]
+
+VOICE_CAPTURE_AGENT_SPEECH_COOLDOWN_SECONDS = 1.25
 
 
 class SpeechSynthesisClient(Protocol):
@@ -400,6 +403,7 @@ class DashboardRuntime:
     _audio_tasks: dict[str, asyncio.Task[bytes]] = field(default_factory=dict, init=False)
     _blocking_agent_speech_event_ids: set[str] = field(default_factory=set, init=False)
     _completed_agent_speech_event_ids: set[str] = field(default_factory=set, init=False)
+    _voice_capture_suppressed_until: float = field(default=0.0, init=False)
 
     @classmethod
     def create_default(cls) -> DashboardRuntime:
@@ -447,6 +451,9 @@ class DashboardRuntime:
         async def submit_human_action(request: HumanActionInput) -> ExternalInputResult:
             return await runtime_ref["runtime"].submit_human_action(request)
 
+        def voice_capture_gate() -> str | None:
+            return runtime_ref["runtime"].voice_capture_suppression_reason()
+
         voice_coordinator = VoiceActionCoordinator(
             orchestrator=orchestrator,
             adapters=VoiceActionAdapters(
@@ -459,6 +466,7 @@ class DashboardRuntime:
             submit_table_talk=submit_table_talk,
             after_events=handle_events,
             publish_snapshot=broadcaster.publish_snapshot,
+            capture_gate=voice_capture_gate,
         )
         runtime = cls(
             orchestrator=orchestrator,
@@ -547,6 +555,14 @@ class DashboardRuntime:
             self.browser_voice_input.submitted_byte_count if self.browser_voice_input else 0
         )
         return status
+
+    def voice_capture_suppression_reason(self) -> str | None:
+        """Return why human voice capture should currently be ignored, if gated."""
+        if self._has_uncompleted_agent_speech():
+            return "agent speech is still playing"
+        if time.monotonic() < self._voice_capture_suppressed_until:
+            return "agent speech just finished"
+        return None
 
     async def browser_voice_websocket_endpoint(self, websocket: WebSocket) -> None:
         """Receive browser microphone PCM chunks for the voice worker."""
@@ -648,6 +664,7 @@ class DashboardRuntime:
         if events:
             await self.handle_new_events(events)
         self._completed_agent_speech_event_ids.add(event_id)
+        self._voice_capture_suppressed_until = time.monotonic() + VOICE_CAPTURE_AGENT_SPEECH_COOLDOWN_SECONDS
         agent_events = await self.process_pending_agent_actions()
         await self.broadcaster.publish_snapshot()
         return [*events, *agent_events]

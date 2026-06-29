@@ -19,6 +19,8 @@ const FRAME_MIME_TYPE = "image/png";
 const VOICE_SAMPLE_RATE = 16000;
 const VOICE_PROCESSOR_BUFFER_SIZE = 4096;
 const VOICE_CHUNK_SAMPLES = 512;
+const VOICE_PLAYBACK_COOLDOWN_MS = 650;
+const VOICE_SOCKET_RECONNECT_MS = 1000;
 const CAMERA_ZONE_STORAGE_KEY = "pokerbot_3000.camera_zones.v1";
 const ZONE_LABELS = {
   board: "Board",
@@ -41,7 +43,10 @@ let voiceSocket = null;
 let voiceAudioContext = null;
 let voiceProcessor = null;
 let voiceSource = null;
+let voiceMonitorGain = null;
+let voiceReconnectTimer = null;
 let voicePcmRemainder = new Int16Array(0);
+let voiceSilencedUntil = 0;
 let shouldPlayInitialSnapshotSpeech = false;
 let shouldSubmitBoardFrames = false;
 let pendingRevealSeat = null;
@@ -459,12 +464,14 @@ async function playOrchestratorSpeech(eventId) {
     audioUrl = URL.createObjectURL(await response.blob());
     audio = new Audio(audioUrl);
     currentSpeechAudio = audio;
+    silenceVoiceCapture();
     await playAudioToEnd(audio);
     spokenEventIds.add(eventId);
   } finally {
     if (currentSpeechAudio === audio) {
       currentSpeechAudio = null;
     }
+    releaseVoiceCaptureAfterPlayback();
     if (audioUrl) {
       URL.revokeObjectURL(audioUrl);
     }
@@ -494,6 +501,20 @@ function playAudioToEnd(audio) {
       reject(error);
     });
   });
+}
+
+function silenceVoiceCapture() {
+  voiceSilencedUntil = Number.POSITIVE_INFINITY;
+  voicePcmRemainder = new Int16Array(0);
+}
+
+function releaseVoiceCaptureAfterPlayback() {
+  voiceSilencedUntil = Date.now() + VOICE_PLAYBACK_COOLDOWN_MS;
+  voicePcmRemainder = new Int16Array(0);
+}
+
+function isVoiceCaptureSuppressed() {
+  return currentSpeechAudio !== null || Date.now() < voiceSilencedUntil;
 }
 
 function renderSnapshot(snapshot) {
@@ -701,17 +722,18 @@ async function startVoiceStream() {
       : { channelCount: 1, echoCancellation: true, noiseSuppression: true },
     video: false,
   });
-  voiceSocket = new WebSocket(`${webSocketProtocol()}//${globalThis.location.host}/ws/voice/human`);
-  voiceSocket.binaryType = "arraybuffer";
-  await waitForSocketOpen(voiceSocket);
+  await connectVoiceSocket();
 
   const AudioContextClass = globalThis.AudioContext || globalThis.webkitAudioContext;
   voiceAudioContext = new AudioContextClass();
   voiceSource = voiceAudioContext.createMediaStreamSource(voiceStream);
   voiceProcessor = voiceAudioContext.createScriptProcessor(VOICE_PROCESSOR_BUFFER_SIZE, 1, 1);
   voiceProcessor.onaudioprocess = submitVoiceAudioProcess;
+  voiceMonitorGain = voiceAudioContext.createGain();
+  voiceMonitorGain.gain.value = 0;
   voiceSource.connect(voiceProcessor);
-  voiceProcessor.connect(voiceAudioContext.destination);
+  voiceProcessor.connect(voiceMonitorGain);
+  voiceMonitorGain.connect(voiceAudioContext.destination);
   setVoiceBrowserStatus("Microphone streaming");
   if (voiceToggle) {
     voiceToggle.textContent = "Stop";
@@ -719,7 +741,15 @@ async function startVoiceStream() {
 }
 
 function submitVoiceAudioProcess(event) {
-  if (!voiceSocket || voiceSocket.readyState !== WebSocket.OPEN || !voiceAudioContext) {
+  if (!voiceAudioContext) {
+    return;
+  }
+  if (isVoiceCaptureSuppressed()) {
+    voicePcmRemainder = new Int16Array(0);
+    return;
+  }
+  if (!voiceSocket || voiceSocket.readyState !== WebSocket.OPEN) {
+    scheduleVoiceSocketReconnect();
     return;
   }
   const input = event.inputBuffer.getChannelData(0);
@@ -756,15 +786,74 @@ function floatToInt16Pcm(buffer) {
 }
 
 function queueVoicePcm(pcm) {
+  if (!voiceSocket || voiceSocket.readyState !== WebSocket.OPEN) {
+    scheduleVoiceSocketReconnect();
+    return;
+  }
   const combined = new Int16Array(voicePcmRemainder.length + pcm.length);
   combined.set(voicePcmRemainder);
   combined.set(pcm, voicePcmRemainder.length);
   let offset = 0;
   while (combined.length - offset >= VOICE_CHUNK_SAMPLES) {
-    voiceSocket.send(combined.slice(offset, offset + VOICE_CHUNK_SAMPLES).buffer);
+    try {
+      voiceSocket.send(combined.slice(offset, offset + VOICE_CHUNK_SAMPLES).buffer);
+    } catch {
+      voicePcmRemainder = new Int16Array(0);
+      scheduleVoiceSocketReconnect();
+      return;
+    }
     offset += VOICE_CHUNK_SAMPLES;
   }
   voicePcmRemainder = combined.slice(offset);
+}
+
+async function connectVoiceSocket() {
+  if (voiceSocket?.readyState === WebSocket.OPEN || voiceSocket?.readyState === WebSocket.CONNECTING) {
+    return;
+  }
+  const socket = new WebSocket(`${webSocketProtocol()}//${globalThis.location.host}/ws/voice/human`);
+  voiceSocket = socket;
+  socket.binaryType = "arraybuffer";
+  socket.addEventListener("open", () => {
+    setVoiceBrowserStatus("Microphone streaming");
+  });
+  socket.addEventListener("close", () => handleVoiceSocketClosed(socket));
+  socket.addEventListener("error", () => handleVoiceSocketError(socket));
+  await waitForSocketOpen(socket);
+}
+
+function handleVoiceSocketClosed(socket) {
+  if (voiceSocket !== socket) {
+    return;
+  }
+  voiceSocket = null;
+  voicePcmRemainder = new Int16Array(0);
+  if (voiceStream) {
+    setVoiceBrowserStatus("Microphone reconnecting");
+    scheduleVoiceSocketReconnect();
+  }
+}
+
+function handleVoiceSocketError(socket) {
+  if (voiceSocket === socket && voiceStream) {
+    setVoiceBrowserStatus("Microphone socket error");
+  }
+}
+
+function scheduleVoiceSocketReconnect() {
+  if (!voiceStream || voiceReconnectTimer) {
+    return;
+  }
+  voiceReconnectTimer = globalThis.setTimeout(() => {
+    voiceReconnectTimer = null;
+    if (!voiceStream) {
+      return;
+    }
+    connectVoiceSocket().catch(() => {
+      setVoiceBrowserStatus("Microphone reconnecting");
+      scheduleVoiceSocketReconnect();
+    });
+  }, VOICE_SOCKET_RECONNECT_MS);
 }
 
 function waitForSocketOpen(socket) {
@@ -777,20 +866,34 @@ function waitForSocketOpen(socket) {
       cleanup();
       reject(new Error("Voice socket failed."));
     };
+    const handleClose = () => {
+      cleanup();
+      reject(new Error("Voice socket closed."));
+    };
     const cleanup = () => {
       socket.removeEventListener("open", handleOpen);
       socket.removeEventListener("error", handleError);
+      socket.removeEventListener("close", handleClose);
     };
     socket.addEventListener("open", handleOpen, { once: true });
     socket.addEventListener("error", handleError, { once: true });
+    socket.addEventListener("close", handleClose, { once: true });
   });
 }
 
 function stopVoiceStream() {
+  if (voiceReconnectTimer) {
+    globalThis.clearTimeout(voiceReconnectTimer);
+    voiceReconnectTimer = null;
+  }
   if (voiceProcessor) {
     voiceProcessor.disconnect();
     voiceProcessor.onaudioprocess = null;
     voiceProcessor = null;
+  }
+  if (voiceMonitorGain) {
+    voiceMonitorGain.disconnect();
+    voiceMonitorGain = null;
   }
   if (voiceSource) {
     voiceSource.disconnect();
@@ -801,8 +904,9 @@ function stopVoiceStream() {
     voiceAudioContext = null;
   }
   if (voiceSocket) {
-    voiceSocket.close();
+    const socket = voiceSocket;
     voiceSocket = null;
+    socket.close();
   }
   if (voiceStream) {
     for (const track of voiceStream.getTracks()) {
@@ -811,6 +915,7 @@ function stopVoiceStream() {
     voiceStream = null;
   }
   voicePcmRemainder = new Int16Array(0);
+  voiceSilencedUntil = 0;
   if (voiceToggle) {
     voiceToggle.textContent = "Use";
   }

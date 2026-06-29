@@ -27,8 +27,30 @@ class _OneShotAudioInput:
         yield self.chunk
 
 
+class _SequenceAudioInput:
+    def __init__(self, chunk_count: int) -> None:
+        self.chunk_count = chunk_count
+
+    async def chunks(self) -> AsyncIterator[AudioChunk]:
+        for _ in range(self.chunk_count):
+            yield AudioChunk(pcm=b"speech")
+
+
 class _PassThroughVad:
     async def speech_segments(self, chunks: AsyncIterator[AudioChunk]) -> AsyncIterator[AudioChunk]:
+        async for chunk in chunks:
+            yield chunk
+
+
+class _RestartableVad:
+    def __init__(self) -> None:
+        self.should_fail = True
+
+    async def speech_segments(self, chunks: AsyncIterator[AudioChunk]) -> AsyncIterator[AudioChunk]:
+        if self.should_fail:
+            self.should_fail = False
+            msg = "temporary VAD failure"
+            raise RuntimeError(msg)
         async for chunk in chunks:
             yield chunk
 
@@ -55,6 +77,16 @@ class _WarmableStaticTranscriber(_StaticTranscriber):
     async def transcribe(self, segment: AudioChunk) -> VoiceTranscript:
         self.events.append("transcribe")
         return await super().transcribe(segment)
+
+
+class _FlakyTranscriber(_StaticTranscriber):
+    async def transcribe(self, segment: AudioChunk) -> VoiceTranscript:
+        self.calls += 1
+        assert segment.pcm == b"speech"
+        if self.calls == 1:
+            msg = "temporary ASR failure"
+            raise RuntimeError(msg)
+        return VoiceTranscript(text=self.text, confidence=0.93)
 
 
 def test_voice_coordinator_submits_parsed_action_when_waiting_for_human():
@@ -93,6 +125,89 @@ def test_voice_coordinator_submits_parsed_action_when_waiting_for_human():
         assert "action_committed" in events_seen
         assert coordinator.status.latest_action == {"type": "bet", "amount": 100, "unit": "chips"}
         assert publishes > 0
+
+    asyncio.run(scenario())
+
+
+def test_voice_coordinator_suppresses_segment_when_capture_gate_is_closed():
+    async def scenario() -> None:
+        orchestrator = InMemoryOrchestrator()
+        orchestrator.start_game()
+        transcriber = _StaticTranscriber("call")
+        coordinator = VoiceActionCoordinator(
+            orchestrator=orchestrator,
+            adapters=VoiceActionAdapters(
+                audio_input=_OneShotAudioInput(),
+                vad=_PassThroughVad(),
+                transcriber=transcriber,
+                parser=DeterministicVoiceCommandParser(),
+            ),
+            capture_gate=lambda: "agent speech is still playing",
+        )
+
+        coordinator.start()
+        await asyncio.sleep(0)
+        await coordinator.stop()
+
+        assert transcriber.calls == 0
+        assert coordinator.status.speech_segment_count == 1
+        assert coordinator.status.ignored_segment_count == 1
+        assert coordinator.status.last_rejection == "Ignored speech because agent speech is still playing."
+
+    asyncio.run(scenario())
+
+
+def test_voice_coordinator_continues_after_transcriber_failure():
+    async def scenario() -> None:
+        orchestrator = InMemoryOrchestrator()
+        orchestrator.start_game()
+        transcriber = _FlakyTranscriber("call")
+        coordinator = VoiceActionCoordinator(
+            orchestrator=orchestrator,
+            adapters=VoiceActionAdapters(
+                audio_input=_SequenceAudioInput(2),
+                vad=_PassThroughVad(),
+                transcriber=transcriber,
+                parser=DeterministicVoiceCommandParser(),
+            ),
+        )
+
+        coordinator.start()
+        await _wait_for(lambda: coordinator.status.latest_action is not None)
+        await coordinator.stop()
+
+        assert transcriber.calls == 2
+        assert coordinator.status.recoverable_error_count == 1
+        assert coordinator.status.latest_action == {"type": "call", "amount": None, "unit": "chips"}
+        assert coordinator.status.last_error is None
+
+    asyncio.run(scenario())
+
+
+def test_voice_coordinator_can_restart_after_worker_failure():
+    async def scenario() -> None:
+        orchestrator = InMemoryOrchestrator()
+        orchestrator.start_game()
+        vad = _RestartableVad()
+        coordinator = VoiceActionCoordinator(
+            orchestrator=orchestrator,
+            adapters=VoiceActionAdapters(
+                audio_input=_OneShotAudioInput(),
+                vad=vad,
+                transcriber=_StaticTranscriber("call"),
+                parser=DeterministicVoiceCommandParser(),
+            ),
+        )
+
+        coordinator.start()
+        await _wait_for(lambda: coordinator.status.state == "error")
+        assert coordinator.status.last_error == "temporary VAD failure"
+
+        coordinator.start()
+        await _wait_for(lambda: coordinator.status.latest_action is not None)
+        await coordinator.stop()
+
+        assert coordinator.status.latest_action == {"type": "call", "amount": None, "unit": "chips"}
 
     asyncio.run(scenario())
 

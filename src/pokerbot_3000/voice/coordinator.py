@@ -36,6 +36,7 @@ type EventHook = Callable[[list[GameEvent]], Awaitable[None]]
 type SnapshotPublisher = Callable[[], Awaitable[None]]
 type HumanActionSubmitter = Callable[[HumanActionInput], Awaitable[ExternalInputResult]]
 type TableTalkSubmitter = Callable[[HumanTableTalkInput], Awaitable[ExternalInputResult]]
+type VoiceCaptureGate = Callable[[], str | None]
 
 
 @runtime_checkable
@@ -67,6 +68,7 @@ class VoiceInputStatus:
     speech_segment_count: int = 0
     transcribed_segment_count: int = 0
     ignored_segment_count: int = 0
+    recoverable_error_count: int = 0
     transcriber_ready: bool = False
 
     def model_dump(self) -> dict[str, Any]:
@@ -81,6 +83,7 @@ class VoiceInputStatus:
             "speech_segment_count": self.speech_segment_count,
             "transcribed_segment_count": self.transcribed_segment_count,
             "ignored_segment_count": self.ignored_segment_count,
+            "recoverable_error_count": self.recoverable_error_count,
             "transcriber_ready": self.transcriber_ready,
         }
 
@@ -97,6 +100,7 @@ class VoiceActionCoordinator:
         submit_table_talk: TableTalkSubmitter | None = None,
         after_events: EventHook | None = None,
         publish_snapshot: SnapshotPublisher | None = None,
+        capture_gate: VoiceCaptureGate | None = None,
         human_seat: int = HUMAN_SEAT,
     ) -> None:
         """Create a coordinator from explicit adapters."""
@@ -106,6 +110,7 @@ class VoiceActionCoordinator:
         self._submit_table_talk = submit_table_talk
         self._after_events = after_events
         self._publish_snapshot = publish_snapshot
+        self._capture_gate = capture_gate
         self._human_seat = human_seat
         self._status = VoiceInputStatus()
         self._task: asyncio.Task[None] | None = None
@@ -146,14 +151,18 @@ class VoiceActionCoordinator:
                     self._status.speech_segment_count,
                     len(segment.pcm),
                 )
-                if (reason := self._not_waiting_for_human_reason()) is not None:
-                    self._status.state = "waiting_for_turn"
-                    self._status.ignored_segment_count += 1
-                    self._status.last_rejection = f"Ignored speech because {reason}."
-                    LOGGER.info("Ignored voice segment because %s.", reason)
-                    await self._publish()
+                if (reason := self._capture_suppression_reason()) is not None:
+                    await self._ignore_segment(reason)
                     continue
-                await self._process_segment(segment)
+                if (reason := self._not_waiting_for_human_reason()) is not None:
+                    await self._ignore_segment(reason)
+                    continue
+                try:
+                    await self._process_segment(segment)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    await self._record_recoverable_segment_error(exc)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -211,9 +220,7 @@ class VoiceActionCoordinator:
         try:
             result = await self._submit_human_action_request(request)
         except Exception as exc:  # noqa: BLE001
-            self._status.state = "error"
-            self._status.last_error = str(exc) or exc.__class__.__name__
-            await self._publish()
+            await self._record_recoverable_segment_error(exc)
             return
 
         if not result.accepted:
@@ -251,9 +258,7 @@ class VoiceActionCoordinator:
         try:
             result = await self._submit_table_talk(request)
         except Exception as exc:  # noqa: BLE001
-            self._status.state = "error"
-            self._status.last_error = str(exc) or exc.__class__.__name__
-            await self._publish()
+            await self._record_recoverable_segment_error(exc)
             return
 
         if self._after_events is not None:
@@ -263,6 +268,25 @@ class VoiceActionCoordinator:
             self._status.last_rejection = result.reason
         else:
             self._status.state = "listening"
+        await self._publish()
+
+    def _capture_suppression_reason(self) -> str | None:
+        if self._capture_gate is None:
+            return None
+        return self._capture_gate()
+
+    async def _ignore_segment(self, reason: str) -> None:
+        self._status.state = "waiting_for_turn"
+        self._status.ignored_segment_count += 1
+        self._status.last_rejection = f"Ignored speech because {reason}."
+        LOGGER.info("Ignored voice segment because %s.", reason)
+        await self._publish()
+
+    async def _record_recoverable_segment_error(self, exc: Exception) -> None:
+        LOGGER.exception("Voice segment processing failed.")
+        self._status.state = "listening"
+        self._status.recoverable_error_count += 1
+        self._status.last_error = str(exc) or exc.__class__.__name__
         await self._publish()
 
     def _not_waiting_for_human_reason(self) -> str | None:
