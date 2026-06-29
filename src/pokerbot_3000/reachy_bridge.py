@@ -6,11 +6,12 @@ import argparse
 import base64
 import importlib
 import json
+import math
 import sys
 import time
 from dataclasses import dataclass, field
 from io import BytesIO
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
@@ -19,9 +20,15 @@ from pokerbot_3000.domain.models import ClientConnectionState
 
 REACHY_CLIENT_ID = "reachy"
 DEFAULT_BASE_URL = "http://127.0.0.1:8000/"
+DEFAULT_REACHY_DAEMON_URL = "http://reachy-mini.local:8000/"
 DEFAULT_POLL_SECONDS = 1.0
 DEFAULT_SOURCE = "reachy_private_camera"
 DEFAULT_REACHY_VOICE = "Aiden"
+DEFAULT_REACHY_CONNECTION_MODE = "auto"
+DEFAULT_REACHY_MEDIA_BACKEND = "default"
+DEFAULT_REACHY_TIMEOUT_SECONDS = 15.0
+
+ReachyConnectionMode = Literal["auto", "localhost_only", "network"]
 
 
 class BridgeError(RuntimeError):
@@ -41,6 +48,9 @@ class BridgeHttpClient(Protocol):
 class ReachyAdapter(Protocol):
     """Robot operations needed by the poker bridge."""
 
+    def wake_up(self) -> None:
+        """Move Reachy out of its sleeping posture."""
+
     def capture_private_cards(self) -> str:
         """Return a JPEG or PNG data URI of Reachy's private cards."""
 
@@ -56,6 +66,7 @@ class BridgeConfig:
     poll_seconds: float = DEFAULT_POLL_SECONDS
     source: str = DEFAULT_SOURCE
     manual_confirm: bool = False
+    wake_on_connect: bool = True
 
 
 class UrllibBridgeHttpClient:
@@ -104,6 +115,10 @@ class UrllibBridgeHttpClient:
 class ConsoleReachyAdapter:
     """Fallback adapter for bridge dry-runs without Reachy hardware."""
 
+    def wake_up(self) -> None:
+        """Print startup wake commands when no robot adapter is available."""
+        print("Reachy wake: console-only mode")
+
     def capture_private_cards(self) -> str:
         """Return no frame in console-only mode."""
         msg = "Reachy SDK is not active; cannot capture private cards."
@@ -115,23 +130,41 @@ class ConsoleReachyAdapter:
         print(f"Reachy presentation: emotion={emotion} voice={DEFAULT_REACHY_VOICE} speech={line}")
 
 
+@dataclass(frozen=True, slots=True)
+class ReachySdkConfig:
+    """Connection settings for the Reachy Mini Python SDK."""
+
+    connection_mode: ReachyConnectionMode = DEFAULT_REACHY_CONNECTION_MODE
+    media_backend: str = DEFAULT_REACHY_MEDIA_BACKEND
+    timeout_seconds: float = DEFAULT_REACHY_TIMEOUT_SECONDS
+
+
 class ReachyMiniAdapter:
     """Reachy Mini SDK adapter."""
 
-    def __init__(self) -> None:
-        """Connect to Reachy Mini using SDK auto-detection."""
+    def __init__(self, config: ReachySdkConfig | None = None) -> None:
+        """Connect to Reachy Mini using the Python SDK."""
+        config = config or ReachySdkConfig()
         try:
             reachy_module = importlib.import_module("reachy_mini")
         except ImportError as exc:
             msg = "Install the Reachy extras with `uv sync --extra reachy` to use the robot bridge."
             raise BridgeError(msg) from exc
 
-        self._context = reachy_module.ReachyMini()
+        self._context = reachy_module.ReachyMini(
+            connection_mode=config.connection_mode,
+            media_backend=config.media_backend,
+            timeout=config.timeout_seconds,
+        )
         self._mini = self._context.__enter__()
 
     def close(self) -> None:
         """Release the SDK context."""
         self._context.__exit__(None, None, None)
+
+    def wake_up(self) -> None:
+        """Run the SDK's built-in wake-up behavior."""
+        self._mini.wake_up()
 
     def capture_private_cards(self) -> str:
         """Capture the current Reachy camera frame as a PNG data URI."""
@@ -175,6 +208,33 @@ class ReachyMiniAdapter:
         )
 
 
+class ReachyDaemonHttpAdapter:
+    """Reachy Mini wireless daemon REST API adapter."""
+
+    def __init__(self, daemon_url: str) -> None:
+        """Create an adapter rooted at the Reachy Mini daemon URL."""
+        self._http = UrllibBridgeHttpClient(daemon_url)
+
+    def capture_private_cards(self) -> str:
+        """Private-card capture is not exposed by the daemon REST API."""
+        msg = (
+            "Reachy daemon HTTP mode cannot capture camera frames. "
+            "Use SDK mode with a supported media backend for private-card capture."
+        )
+        raise BridgeError(msg)
+
+    def wake_up(self) -> None:
+        """Run the daemon's built-in wake-up behavior."""
+        self._http.post_json("/api/move/play/wake_up", {})
+
+    def perform(self, emotion: str, speech: str | None) -> None:
+        """Perform one symbolic movement through the daemon REST API."""
+        pose = _movement_for_emotion(emotion)
+        self._http.post_json("/api/move/goto", _daemon_goto_payload(pose))
+        if speech:
+            print(f"Reachy voice ({DEFAULT_REACHY_VOICE}): {speech}")
+
+
 @dataclass(frozen=True, slots=True)
 class MovementPose:
     """Symbolic Reachy movement recipe."""
@@ -198,6 +258,23 @@ def _movement_for_emotion(emotion: str) -> MovementPose:
     return poses.get(emotion, poses["confused"])
 
 
+def _daemon_goto_payload(pose: MovementPose) -> dict[str, object]:
+    return {
+        "head_pose": {
+            "x": 0.0,
+            "y": 0.0,
+            "z": pose.z_mm / 1000,
+            "roll": math.radians(pose.roll_deg),
+            "pitch": 0.0,
+            "yaw": 0.0,
+        },
+        "antennas": [math.radians(pose.left_antenna_deg), math.radians(pose.right_antenna_deg)],
+        "body_yaw": math.radians(pose.body_yaw_deg),
+        "duration": pose.duration,
+        "interpolation": "cartoon",
+    }
+
+
 @dataclass(slots=True)
 class ReachyBridge:
     """Poll the orchestrator and perform Reachy thin-client duties."""
@@ -211,6 +288,8 @@ class ReachyBridge:
         """Run the bridge until interrupted."""
         self._post_status(ClientConnectionState.CONNECTED, "Reachy bridge connected")
         try:
+            if self.config.wake_on_connect:
+                self.reachy.wake_up()
             while True:
                 self.tick()
                 time.sleep(self.config.poll_seconds)
@@ -283,8 +362,9 @@ def main(argv: list[str] | None = None) -> None:
         poll_seconds=args.poll_seconds,
         source=args.source,
         manual_confirm=args.manual_confirm,
+        wake_on_connect=args.wake_on_connect,
     )
-    adapter: ReachyAdapter = ConsoleReachyAdapter() if args.console_only else ReachyMiniAdapter()
+    adapter = _build_reachy_adapter(args)
     try:
         ReachyBridge(config=config, http=UrllibBridgeHttpClient(config.base_url), reachy=adapter).start()
     finally:
@@ -298,11 +378,54 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Pokerbot app base URL.")
     parser.add_argument("--poll-seconds", default=DEFAULT_POLL_SECONDS, type=float, help="Polling interval.")
     parser.add_argument("--source", default=DEFAULT_SOURCE, help="Private-card frame source label.")
+    parser.add_argument(
+        "--reachy-daemon-url",
+        help=(
+            "Reachy Mini wireless daemon URL. When set, the bridge uses the daemon REST API instead of SDK/Zenoh."
+        ),
+    )
+    parser.add_argument(
+        "--reachy-connection-mode",
+        choices=["auto", "localhost_only", "network"],
+        default=DEFAULT_REACHY_CONNECTION_MODE,
+        help="Reachy SDK connection mode.",
+    )
+    parser.add_argument(
+        "--reachy-media-backend",
+        default=DEFAULT_REACHY_MEDIA_BACKEND,
+        help="Reachy SDK media backend.",
+    )
+    parser.add_argument(
+        "--reachy-timeout",
+        default=DEFAULT_REACHY_TIMEOUT_SECONDS,
+        type=float,
+        help="Reachy SDK connection timeout in seconds.",
+    )
     capture_mode = parser.add_mutually_exclusive_group()
     capture_mode.add_argument("--auto-capture", action="store_true", help="Capture as soon as the orchestrator asks.")
     capture_mode.add_argument("--manual-confirm", action="store_true", help="Prompt before capturing private cards.")
+    parser.add_argument(
+        "--no-wake-on-connect",
+        action="store_false",
+        dest="wake_on_connect",
+        help="Do not move Reachy into the default wake pose when the bridge connects.",
+    )
     parser.add_argument("--console-only", action="store_true", help="Run without connecting to Reachy hardware.")
     return parser.parse_args(argv)
+
+
+def _build_reachy_adapter(args: argparse.Namespace) -> ReachyAdapter:
+    if args.console_only:
+        return ConsoleReachyAdapter()
+    if args.reachy_daemon_url:
+        return ReachyDaemonHttpAdapter(str(args.reachy_daemon_url))
+    return ReachyMiniAdapter(
+        ReachySdkConfig(
+            connection_mode=cast("ReachyConnectionMode", args.reachy_connection_mode),
+            media_backend=args.reachy_media_backend,
+            timeout_seconds=args.reachy_timeout,
+        )
+    )
 
 
 def _optional_string(value: object) -> str | None:
