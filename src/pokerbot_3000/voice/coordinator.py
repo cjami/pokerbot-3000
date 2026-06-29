@@ -8,7 +8,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
-from pokerbot_3000.domain.models import GameEvent, PendingInputType
+from pokerbot_3000.domain.models import ExternalInputResult, GameEvent, HumanTableTalkInput, PendingInputType
 
 if TYPE_CHECKING:
     from pokerbot_3000.orchestrator import InMemoryOrchestrator
@@ -24,6 +24,7 @@ HUMAN_SEAT: Final = 1
 
 type EventHook = Callable[[list[GameEvent]], Awaitable[None]]
 type SnapshotPublisher = Callable[[], Awaitable[None]]
+type TableTalkSubmitter = Callable[[HumanTableTalkInput], Awaitable[ExternalInputResult]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,7 @@ class VoiceInputStatus:
     state: str = "starting"
     latest_transcript: str | None = None
     latest_action: dict[str, Any] | None = None
+    latest_table_talk: dict[str, Any] | None = None
     last_rejection: str | None = None
     last_error: str | None = None
 
@@ -52,6 +54,7 @@ class VoiceInputStatus:
             "state": self.state,
             "latest_transcript": self.latest_transcript,
             "latest_action": self.latest_action,
+            "latest_table_talk": self.latest_table_talk,
             "last_rejection": self.last_rejection,
             "last_error": self.last_error,
         }
@@ -60,11 +63,12 @@ class VoiceInputStatus:
 class VoiceActionCoordinator:
     """Listen for human speech and submit parsed poker actions."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         orchestrator: InMemoryOrchestrator,
         adapters: VoiceActionAdapters,
+        submit_table_talk: TableTalkSubmitter | None = None,
         after_events: EventHook | None = None,
         publish_snapshot: SnapshotPublisher | None = None,
         human_seat: int = HUMAN_SEAT,
@@ -72,6 +76,7 @@ class VoiceActionCoordinator:
         """Create a coordinator from explicit adapters."""
         self._orchestrator = orchestrator
         self._adapters = adapters
+        self._submit_table_talk = submit_table_talk
         self._after_events = after_events
         self._publish_snapshot = publish_snapshot
         self._human_seat = human_seat
@@ -130,12 +135,18 @@ class VoiceActionCoordinator:
         if request is None:
             self._status.state = "listening"
             self._status.latest_action = None
+            self._status.latest_table_talk = None
             self._status.last_rejection = "Transcript did not contain a clear poker action."
             await self._publish()
             return
 
+        if isinstance(request, HumanTableTalkInput):
+            await self._submit_table_talk_request(request)
+            return
+
         self._status.state = "submitting"
         self._status.latest_action = request.action.model_dump(mode="json")
+        self._status.latest_table_talk = None
         await self._publish()
 
         event_start = self._orchestrator.event_count()
@@ -155,6 +166,35 @@ class VoiceActionCoordinator:
             self._status.last_rejection = result.reason
         else:
             self._status.state = "waiting_for_turn"
+        await self._publish()
+
+    async def _submit_table_talk_request(self, request: HumanTableTalkInput) -> None:
+        self._status.state = "submitting"
+        self._status.latest_action = None
+        self._status.latest_table_talk = request.model_dump(mode="json")
+        await self._publish()
+
+        if self._submit_table_talk is None:
+            self._status.state = "listening"
+            self._status.last_rejection = "Human table talk is not configured."
+            await self._publish()
+            return
+
+        try:
+            result = await self._submit_table_talk(request)
+        except Exception as exc:  # noqa: BLE001
+            self._status.state = "error"
+            self._status.last_error = str(exc) or exc.__class__.__name__
+            await self._publish()
+            return
+
+        if self._after_events is not None:
+            await self._after_events(result.events)
+        if not result.accepted:
+            self._status.state = "listening"
+            self._status.last_rejection = result.reason
+        else:
+            self._status.state = "listening"
         await self._publish()
 
     def _is_waiting_for_human(self) -> bool:

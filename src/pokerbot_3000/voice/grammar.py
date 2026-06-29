@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal, cast
 
-from pokerbot_3000.domain.models import ActionType, HumanActionInput, PokerAction
+from pokerbot_3000.domain.models import ActionType, HumanActionInput, HumanTableTalkInput, PokerAction
 
 if TYPE_CHECKING:
     from pokerbot_3000.ports.voice import VoiceTranscript
@@ -66,10 +66,17 @@ class DeterministicVoiceCommandParser:
 
     seat: int = _HUMAN_SEAT
 
-    def parse(self, transcript: VoiceTranscript) -> HumanActionInput | None:
+    def parse(self, transcript: VoiceTranscript) -> HumanActionInput | HumanTableTalkInput | None:
         """Parse one transcript into a human action when it is unambiguous."""
         text = _normalize(transcript.text)
-        if not text or _UNSAFE_CONTEXT.search(text):
+        if not text:
+            return None
+
+        table_talk = _parse_table_talk(text, transcript, seat=self.seat)
+        if table_talk is not None:
+            return table_talk
+
+        if _UNSAFE_CONTEXT.search(text):
             return None
 
         action = _parse_action(text)
@@ -82,6 +89,26 @@ class DeterministicVoiceCommandParser:
             raw_transcript=transcript.text,
             confidence=transcript.confidence,
         )
+
+
+def _parse_table_talk(text: str, transcript: VoiceTranscript, *, seat: int) -> HumanTableTalkInput | None:
+    matches = list(re.finditer(r"\b(?:reachy|eliza)\b", text))
+    if not matches:
+        return None
+    target = min(matches, key=lambda match: match.start())
+    message = f"{text[: target.start()]} {text[target.end() :]}".strip()
+    message = re.sub(r"^(?:hey|hi|yo|ok|okay)\s+", "", message).strip()
+    if not message or message in {"hey", "hi", "yo", "ok", "okay"}:
+        return None
+    target_agent_id = cast('Literal["reachy", "eliza"]', target.group(0))
+    return HumanTableTalkInput(
+        source=_ACTION_SOURCE,
+        seat=seat,
+        target_agent_id=target_agent_id,
+        message=message,
+        raw_transcript=transcript.text,
+        confidence=transcript.confidence,
+    )
 
 
 def _parse_action(text: str) -> PokerAction | None:

@@ -5,10 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
+from pokerbot_3000.domain.models import HumanActionInput, HumanTableTalkInput
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from pokerbot_3000.domain.models import HumanActionInput
+
+type VoiceCommand = HumanActionInput | HumanTableTalkInput
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +34,7 @@ class AudioChunk:
 class VoiceCommandParser(Protocol):
     """Parser that turns transcripts into proposed actions."""
 
-    def parse(self, transcript: VoiceTranscript) -> HumanActionInput | None:
+    def parse(self, transcript: VoiceTranscript) -> VoiceCommand | None:
         """Parse a transcript into a proposed action when possible."""
 
 

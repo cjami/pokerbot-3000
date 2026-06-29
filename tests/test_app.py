@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from pokerbot_3000.app.runtime import (
     AgentActionProcessor,
+    AgentBanterSource,
     DashboardEventBroadcaster,
     DashboardRuntime,
     PrivateCardsFrameProcessor,
@@ -15,7 +16,9 @@ from pokerbot_3000.app.runtime import (
 from pokerbot_3000.app.server import create_app
 from pokerbot_3000.domain.cards import Card
 from pokerbot_3000.domain.models import (
+    GameEvent,
     HumanActionInput,
+    HumanTableTalkInput,
     PokerAction,
     PrivateAgentState,
     PrivateCardObservation,
@@ -24,7 +27,7 @@ from pokerbot_3000.domain.models import (
     Street,
 )
 from pokerbot_3000.orchestrator import InMemoryOrchestrator
-from pokerbot_3000.ports.llm import AgentDecision, ImageFrame
+from pokerbot_3000.ports.llm import AgentBanterDecision, AgentDecision, ImageFrame
 from pokerbot_3000.ports.perception import PublicVisionSource
 from pokerbot_3000.voice import BrowserAudioInput
 
@@ -152,7 +155,51 @@ class FakeAgentDecisions:
         )
 
 
-def build_test_runtime(public_vision: PublicVisionSource | None = None) -> DashboardRuntime:
+class FakeAgentBanter:
+    """Banter fake that returns deterministic direct replies and optional action reactions."""
+
+    def __init__(self, *, reaction: AgentBanterDecision | None = None) -> None:
+        """Initialize the fake with an optional human-action reaction."""
+        self.reaction = reaction or AgentBanterDecision(
+            agent_id=None,
+            speech=None,
+            reaction={"intent": "no_reaction"},
+            confidence=1.0,
+        )
+        self.direct_requests: list[HumanTableTalkInput] = []
+        self.action_events: list[str] = []
+
+    async def respond_to_human_table_talk(
+        self,
+        request: HumanTableTalkInput,
+        public_state: PublicGameState,
+    ) -> AgentBanterDecision:
+        """Return a deterministic response from the addressed agent."""
+        _ = public_state
+        self.direct_requests.append(request)
+        return AgentBanterDecision(
+            agent_id=request.target_agent_id,
+            speech="I am listening.",
+            reaction={"intent": "table_talk_reply"},
+            confidence=0.9,
+            emotion="confused",
+        )
+
+    async def react_to_human_action(
+        self,
+        event: GameEvent,
+        public_state: PublicGameState,
+    ) -> AgentBanterDecision:
+        """Return the configured reaction to a human action."""
+        _ = public_state
+        self.action_events.append(event.event_id)
+        return self.reaction
+
+
+def build_test_runtime(
+    public_vision: PublicVisionSource | None = None,
+    agent_banter_source: AgentBanterSource | None = None,
+) -> DashboardRuntime:
     orchestrator = InMemoryOrchestrator()
     runtime_ref: dict[str, DashboardRuntime] = {}
 
@@ -187,6 +234,7 @@ def build_test_runtime(public_vision: PublicVisionSource | None = None) -> Dashb
         private_cards_processor=private_processor,
         revealed_cards_processor=revealed_processor,
         agent_action_processor=agent_action_processor,
+        agent_banter_source=agent_banter_source,
         voice_client_factory=FakeVoiceClient,
     )
     runtime_ref["runtime"] = runtime
@@ -334,6 +382,72 @@ def test_api_human_action_advances_until_eliza_input_needed():
     assert payload["state"]["board_recognition"]["expected_card_count"] == 4
     assert "action_proposed" in {event["event_type"] for event in payload["events"]}
     assert "action_committed" in {event["event_type"] for event in payload["events"]}
+
+
+def test_api_human_table_talk_responds_without_consuming_action():
+    banter = FakeAgentBanter()
+    runtime = build_test_runtime(agent_banter_source=banter)
+    client = TestClient(create_app(runtime))
+    client.post("/api/game/start")
+
+    response = client.post(
+        "/api/inputs/human-table-talk",
+        json={
+            "source": "voice",
+            "target_agent_id": "eliza",
+            "message": "are you feeling lucky",
+            "raw_transcript": "Eliza, are you feeling lucky?",
+            "confidence": 0.95,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["accepted"] is True
+    assert payload["state"]["waiting_for"]["type"] == "human_action"
+    assert payload["state"]["active_player_seat"] == 1
+    assert "human_table_talk" in {event["event_type"] for event in payload["events"]}
+    presentation = next(event for event in payload["events"] if event["event_type"] == "presentation_command")
+    assert presentation["payload"]["target_client"] == "eliza"
+    assert presentation["payload"]["speech"] == "I am listening."
+    assert presentation["payload"]["emotion"] == "confused"
+    assert banter.direct_requests[0].target_agent_id == "eliza"
+
+
+def test_runtime_human_action_reaction_is_queued_before_agent_decisions():
+    reaction = AgentBanterDecision(
+        agent_id="reachy",
+        speech="Bold move, Che.",
+        reaction={"intent": "human_action_reaction"},
+        confidence=0.9,
+        emotion="confident",
+    )
+    runtime = build_test_runtime(agent_banter_source=FakeAgentBanter(reaction=reaction))
+    client = TestClient(create_app(runtime))
+    client.post("/api/game/start")
+    _open_human_action_after_flop(runtime.orchestrator)
+
+    response = client.post(
+        "/api/inputs/human-action",
+        json={"source": "voice", "action": {"type": "bet", "amount": 100}},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    presentation_index = next(
+        index
+        for index, event in enumerate(payload["events"])
+        if event["event_type"] == "presentation_command"
+        and event["payload"].get("intent") == "human_action_reaction"
+    )
+    agent_decision_index = next(
+        index for index, event in enumerate(payload["events"]) if event["event_type"] == "agent_decision"
+    )
+    presentation = payload["events"][presentation_index]
+    assert presentation_index < agent_decision_index
+    assert presentation["payload"]["target_client"] == "reachy"
+    assert presentation["payload"]["speech"] == "Bold move, Che."
+    assert presentation["payload"]["emotion"] == "confident"
 
 
 def test_api_thin_client_private_cards_trigger_internal_agent_turn():

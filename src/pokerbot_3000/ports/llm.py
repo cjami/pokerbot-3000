@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from pokerbot_3000.domain.cards import Card
     from pokerbot_3000.domain.models import (
         GameEvent,
+        HumanTableTalkInput,
         PokerAction,
         PrivateAgentState,
         PrivateCardObservation,
@@ -38,6 +39,17 @@ class AgentDecision:
     confidence: float
 
 
+@dataclass(frozen=True, slots=True)
+class AgentBanterDecision:
+    """Structured optional table-talk response returned by the LLM gateway."""
+
+    agent_id: str | None
+    speech: str | None
+    reaction: dict[str, object]
+    confidence: float
+    emotion: str = "calm"
+
+
 class LlmGateway(Protocol):
     """Task-level LLM interface owned by the Python orchestrator."""
 
@@ -63,3 +75,17 @@ class LlmGateway(Protocol):
 
     async def generate_table_talk(self, agent_id: str, event: GameEvent) -> str:
         """Generate a table-talk line for an agent."""
+
+    async def respond_to_human_table_talk(
+        self,
+        request: HumanTableTalkInput,
+        public_state: PublicGameState,
+    ) -> AgentBanterDecision:
+        """Respond to direct human speech addressed to one agent."""
+
+    async def react_to_human_action(
+        self,
+        event: GameEvent,
+        public_state: PublicGameState,
+    ) -> AgentBanterDecision:
+        """Optionally react to one committed human poker action."""

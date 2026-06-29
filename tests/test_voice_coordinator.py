@@ -4,7 +4,9 @@ from typing import Any
 
 from pokerbot_3000.domain.cards import Card
 from pokerbot_3000.domain.models import (
+    ExternalInputResult,
     HumanActionInput,
+    HumanTableTalkInput,
     PendingInputType,
     PokerAction,
     PrivateCardObservation,
@@ -106,6 +108,52 @@ def test_voice_coordinator_ignores_segments_when_not_waiting_for_human():
         waiting_for = orchestrator.public_state().waiting_for
         assert waiting_for is not None
         assert waiting_for.type == PendingInputType.PUBLIC_BOARD_CARDS
+
+    asyncio.run(scenario())
+
+
+def test_voice_coordinator_submits_agent_address_without_consuming_human_turn():
+    async def scenario() -> None:
+        orchestrator = InMemoryOrchestrator()
+        orchestrator.start_game()
+        _open_human_action_after_flop(orchestrator)
+        events_seen: list[str] = []
+
+        async def submit_table_talk(request: HumanTableTalkInput) -> ExternalInputResult:
+            return orchestrator.submit_human_table_talk(
+                request,
+                speech="I see you, Che.",
+                reaction={"intent": "table_talk_reply"},
+            )
+
+        async def after_events(events: list[Any]) -> None:
+            events_seen.extend(event.event_type for event in events)
+
+        coordinator = VoiceActionCoordinator(
+            orchestrator=orchestrator,
+            adapters=VoiceActionAdapters(
+                audio_input=_OneShotAudioInput(),
+                vad=_PassThroughVad(),
+                transcriber=_StaticTranscriber("Eliza, I call your bluff"),
+                parser=DeterministicVoiceCommandParser(),
+            ),
+            submit_table_talk=submit_table_talk,
+            after_events=after_events,
+        )
+
+        coordinator.start()
+        await _wait_for(lambda: coordinator.status.latest_table_talk is not None)
+        await coordinator.stop()
+
+        state = orchestrator.public_state()
+        assert state.waiting_for is not None
+        assert state.waiting_for.type == PendingInputType.HUMAN_ACTION
+        assert state.pot == 60
+        assert "human_table_talk" in events_seen
+        assert "action_committed" not in events_seen
+        assert coordinator.status.latest_action is None
+        assert coordinator.status.latest_table_talk is not None
+        assert coordinator.status.latest_table_talk["target_agent_id"] == "eliza"
 
     asyncio.run(scenario())
 

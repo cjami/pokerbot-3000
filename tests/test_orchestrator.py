@@ -5,6 +5,7 @@ from pokerbot_3000.domain.models import (
     EventType,
     ExternalInputResult,
     HumanActionInput,
+    HumanTableTalkInput,
     ObservationReceipt,
     PendingInputType,
     PokerAction,
@@ -161,6 +162,58 @@ def test_orchestrator_rejects_invalid_agent_decision_and_keeps_agent_paused():
     assert result.state.waiting_for.type == PendingInputType.AGENT_ACTION
     assert result.state.waiting_for.agent_id == "eliza"
     assert "agent_decision_failed" in {event.event_type for event in result.events}
+
+
+def test_orchestrator_agent_fallback_speech_uses_contemplation_break():
+    orchestrator = InMemoryOrchestrator()
+    orchestrator.start_game()
+    orchestrator.submit_human_action(HumanActionInput.model_validate({"action": {"type": "call"}}))
+    _record_private(orchestrator, "eliza")
+
+    result = orchestrator.submit_agent_decision(
+        AgentDecision(
+            agent_id="eliza",
+            action=PokerAction.model_validate({"type": "call"}),
+            speech=None,
+            reaction={"intent": "announce_action"},
+            confidence=0.9,
+        )
+    )
+
+    speech = [
+        event.payload.get("speech")
+        for event in result.events
+        if event.event_type == "presentation_command" and event.payload.get("target_client") == "eliza"
+    ]
+    assert speech == ['That price is workable. <break time="0.8s" /> Eliza call.']
+    line = speech[0]
+    assert isinstance(line, str)
+    assert line.count('<break time="0.8s" />') == 1
+
+
+def test_orchestrator_human_table_talk_keeps_human_action_pending():
+    orchestrator = InMemoryOrchestrator()
+    orchestrator.start_game()
+
+    result = orchestrator.submit_human_table_talk(
+        HumanTableTalkInput(
+            target_agent_id="reachy",
+            message="what do you think",
+            raw_transcript="Reachy, what do you think?",
+        ),
+        speech="I am calibrating the vibes.",
+        reaction={"intent": "table_talk_reply"},
+        emotion="celebrate",
+    )
+
+    assert result.accepted is True
+    assert result.state.waiting_for is not None
+    assert result.state.waiting_for.type == PendingInputType.HUMAN_ACTION
+    assert result.state.pot == 30
+    event_types = [event.event_type for event in result.events]
+    assert event_types == [EventType.HUMAN_TABLE_TALK, EventType.PRESENTATION_COMMAND]
+    assert result.events[1].payload["target_client"] == "reachy"
+    assert result.events[1].payload["emotion"] == "celebrate"
 
 
 def test_orchestrator_postflop_bet_runs_until_turn_recognition_after_agent_calls():

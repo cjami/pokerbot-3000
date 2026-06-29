@@ -18,12 +18,12 @@ from pydantic import TypeAdapter
 from pokerbot_3000.domain.cards import Card, CardRank, CardSuit
 from pokerbot_3000.domain.models import ActionType, PokerAction, PrivateCardObservation, PublicTableObservation, Street
 from pokerbot_3000.llm.prompt_catalog import PromptCatalog, load_prompts
-from pokerbot_3000.ports.llm import AgentDecision, ImageFrame
+from pokerbot_3000.ports.llm import AgentBanterDecision, AgentDecision, ImageFrame
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from pokerbot_3000.domain.models import GameEvent, PrivateAgentState, PublicGameState
+    from pokerbot_3000.domain.models import GameEvent, HumanTableTalkInput, PrivateAgentState, PublicGameState
 
 type JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 type JsonObject = dict[str, JsonValue]
@@ -43,6 +43,7 @@ _ACTION_TYPE_VALUES: Final = [action.value for action in ActionType]
 _CARD_RANK_VALUES: Final = [rank.value for rank in CardRank]
 _CARD_SUIT_VALUES: Final = [suit.value for suit in CardSuit]
 _STREET_VALUES: Final = [street.value for street in Street]
+_AGENT_EMOTION_VALUES: Final = ["calm", "confident", "celebrate", "confused", "sad"]
 
 
 class CerebrasConfigurationError(RuntimeError):
@@ -242,6 +243,59 @@ class CerebrasLlmClient:
         )
         return text.strip().strip('"')
 
+    async def respond_to_human_table_talk(
+        self,
+        request: HumanTableTalkInput,
+        public_state: PublicGameState,
+    ) -> AgentBanterDecision:
+        """Respond to direct human speech addressed to one agent."""
+        payload = await self._chat_json(
+            [
+                _system_message(self._prompts.agent_banter_system),
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "task": "direct_reply",
+                            "target_agent_id": request.target_agent_id,
+                            "human_message": request.message,
+                            "public_state": public_state.model_dump(mode="json"),
+                            "instruction": "Return speech from the addressed agent.",
+                        },
+                    ),
+                },
+            ],
+            max_tokens=160,
+            response_format=AGENT_BANTER_RESPONSE_FORMAT,
+        )
+        return _agent_banter_decision(payload, default_agent_id=request.target_agent_id)
+
+    async def react_to_human_action(
+        self,
+        event: GameEvent,
+        public_state: PublicGameState,
+    ) -> AgentBanterDecision:
+        """Optionally react to one committed human poker action."""
+        payload = await self._chat_json(
+            [
+                _system_message(self._prompts.agent_banter_system),
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "task": "human_action_reaction",
+                            "event": event.model_dump(mode="json"),
+                            "public_state": public_state.model_dump(mode="json"),
+                            "instruction": "Choose reachy, eliza, or no reaction.",
+                        },
+                    ),
+                },
+            ],
+            max_tokens=160,
+            response_format=AGENT_BANTER_RESPONSE_FORMAT,
+        )
+        return _agent_banter_decision(payload, default_agent_id=None)
+
     async def _chat_json(
         self,
         messages: list[JsonObject],
@@ -416,6 +470,19 @@ AGENT_DECISION_RESPONSE_FORMAT: Final = _strict_response_format(
         ["action", "speech", "reaction", "confidence"],
     ),
 )
+AGENT_BANTER_RESPONSE_FORMAT: Final = _strict_response_format(
+    "agent_banter",
+    _object_schema(
+        {
+            "agent_id": _nullable(_string_enum(["reachy", "eliza"])),
+            "speech": _NULLABLE_STRING,
+            "reaction": _object_schema({"intent": {"type": "string"}}, ["intent"]),
+            "emotion": _string_enum(_AGENT_EMOTION_VALUES),
+            "confidence": CONFIDENCE_SCHEMA,
+        },
+        ["agent_id", "speech", "reaction", "emotion", "confidence"],
+    ),
+)
 
 
 def _system_message(content: str) -> JsonObject:
@@ -515,6 +582,35 @@ def _object_dict(value: object, *, default: dict[str, object]) -> dict[str, obje
         msg = "Expected string keys for reaction."
         raise CerebrasClientError(msg)
     return {key: item for key, item in value.items() if isinstance(key, str)}
+
+
+def _agent_banter_decision(payload: JsonObject, *, default_agent_id: str | None) -> AgentBanterDecision:
+    agent_id = payload.get("agent_id")
+    if agent_id is None:
+        agent_id = default_agent_id
+    if agent_id is not None and agent_id not in {"reachy", "eliza"}:
+        msg = f"Unknown poker agent {agent_id!r}."
+        raise CerebrasClientError(msg)
+    speech = payload.get("speech")
+    if speech is not None and not isinstance(speech, str):
+        msg = "Expected string or null speech from Cerebras response."
+        raise CerebrasClientError(msg)
+    return AgentBanterDecision(
+        agent_id=cast("str | None", agent_id),
+        speech=speech.strip() if isinstance(speech, str) and speech.strip() else None,
+        reaction=_object_dict(payload.get("reaction"), default={"intent": "table_talk"}),
+        confidence=_confidence(payload.get("confidence")),
+        emotion=_agent_emotion(payload.get("emotion")),
+    )
+
+
+def _agent_emotion(value: object) -> str:
+    if value is None:
+        return "calm"
+    if not isinstance(value, str) or value not in _AGENT_EMOTION_VALUES:
+        msg = "Expected preset agent emotion from Cerebras response."
+        raise CerebrasClientError(msg)
+    return value
 
 
 def _confidence(value: object) -> float:

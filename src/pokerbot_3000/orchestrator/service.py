@@ -20,6 +20,7 @@ from pokerbot_3000.domain.models import (
     ExternalInputResult,
     GameEvent,
     HumanActionInput,
+    HumanTableTalkInput,
     ObservationReceipt,
     OperatorControlResult,
     PendingInput,
@@ -47,6 +48,7 @@ BOARD_COMPLETE_CARD_COUNT = 5
 HOLE_CARD_COUNT = 2
 MIN_PLAYERS_FOR_HAND = 2
 MIN_NON_ALL_IN_PLAYERS_FOR_BETTING = 2
+ACTION_SPEECH_BREAK = '<break time="0.8s" />'
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +248,49 @@ class InMemoryOrchestrator:
             state=self.public_state(),
         )
 
+    def submit_human_table_talk(
+        self,
+        request: HumanTableTalkInput,
+        *,
+        speech: str | None,
+        reaction: dict[str, object] | None = None,
+        emotion: str = "calm",
+    ) -> ExternalInputResult:
+        """Record human table talk and queue a targeted agent response."""
+        event_start = len(self._events)
+        if self._state.automation_status == "stopped":
+            return self._external_rejection("Game is stopped. Start the game before speaking to an agent.")
+        if not self._is_waiting_for(PendingInputType.HUMAN_ACTION, seat=request.seat):
+            return self._external_rejection("The engine is not waiting for human input from that seat.")
+        self._ensure_known_agent(request.target_agent_id)
+
+        self._append_event(
+            EventType.HUMAN_TABLE_TALK,
+            source=request.source,
+            summary=f"S{request.seat} spoke to {self._agent_profiles[request.target_agent_id].display_name}.",
+            payload={
+                "seat": request.seat,
+                "target_agent_id": request.target_agent_id,
+                "message": request.message,
+                "raw_transcript": request.raw_transcript,
+                "confidence": request.confidence,
+            },
+        )
+        if speech and speech.strip():
+            self._queue_agent_presentation(
+                request.target_agent_id,
+                speech.strip(),
+                reaction=reaction or {"intent": "table_talk_reply"},
+                intent="table_talk_reply",
+                presentation=(emotion, "nod"),
+            )
+        return ExternalInputResult(
+            accepted=True,
+            reason="Human table talk recorded; poker action is still pending.",
+            events=self.events_since(event_start),
+            state=self.public_state(),
+        )
+
     def submit_agent_decision(self, decision: AgentDecision) -> ExternalInputResult:
         """Consume one Gemma agent decision and continue orchestration."""
         event_start = len(self._events)
@@ -278,18 +323,12 @@ class InMemoryOrchestrator:
                 "known_private_card_count": len(self._private_states[agent_id].hole_cards),
             },
         )
-        self._append_event(
-            EventType.PRESENTATION_COMMAND,
-            source="orchestrator",
-            summary=f"Queued {profile.display_name} presentation output.",
-            payload={
-                "target_client": profile.client_id,
-                "intent": _reaction_intent(decision.reaction),
-                "speech": decision.speech or _default_agent_speech(profile.display_name, decision.action),
-                "emotion": _emotion_for_action(decision.action.type),
-                "gesture": _gesture_for_action(decision.action.type),
-                "priority": "normal",
-            },
+        self._queue_agent_presentation(
+            agent_id,
+            _agent_action_speech(profile.display_name, decision.action, decision.speech),
+            reaction=decision.reaction,
+            intent=_reaction_intent(decision.reaction),
+            presentation=(_emotion_for_action(decision.action.type), _gesture_for_action(decision.action.type)),
         )
         self._advance_after_action()
         return ExternalInputResult(
@@ -318,6 +357,25 @@ class InMemoryOrchestrator:
             source=f"agent:{agent_id}",
             summary=f"Gemma decision failed for {profile.display_name}: {message}",
             payload={"agent_id": agent_id, "error": message},
+        )
+
+    def record_agent_banter_response(
+        self,
+        agent_id: str,
+        speech: str,
+        *,
+        reaction: dict[str, object] | None = None,
+        intent: str = "human_action_reaction",
+        emotion: str = "calm",
+    ) -> GameEvent:
+        """Queue one targeted presentation response for an agent."""
+        self._ensure_known_agent(agent_id)
+        return self._queue_agent_presentation(
+            agent_id,
+            speech,
+            reaction=reaction or {"intent": intent},
+            intent=intent,
+            presentation=(emotion, "nod"),
         )
 
     def record_public_observation(self, observation: PublicTableObservation) -> ObservationReceipt:
@@ -830,6 +888,31 @@ class InMemoryOrchestrator:
                 "voice": "orchestrator",
                 "intent": intent,
                 "speech": speech,
+                "priority": "normal",
+            },
+        )
+
+    def _queue_agent_presentation(
+        self,
+        agent_id: str,
+        speech: str,
+        *,
+        reaction: dict[str, object],
+        intent: str,
+        presentation: tuple[str, str] = ("calm", "nod"),
+    ) -> GameEvent:
+        profile = self._agent_profiles[agent_id]
+        emotion, gesture = presentation
+        return self._append_event(
+            EventType.PRESENTATION_COMMAND,
+            source="orchestrator",
+            summary=f"Queued {profile.display_name} presentation output.",
+            payload={
+                "target_client": profile.client_id,
+                "intent": _reaction_intent(reaction) or intent,
+                "speech": speech,
+                "emotion": emotion,
+                "gesture": gesture,
                 "priority": "normal",
             },
         )
@@ -1389,7 +1472,24 @@ def _reaction_intent(reaction: dict[str, object]) -> str:
     return intent if isinstance(intent, str) and intent else "announce_action"
 
 
-def _default_agent_speech(display_name: str, action: PokerAction) -> str:
+def _agent_action_speech(display_name: str, action: PokerAction, speech: str | None) -> str:
+    if speech and speech.strip():
+        return speech.strip()
+    return f"{_default_agent_remark(action)} {ACTION_SPEECH_BREAK} {_agent_action_declaration(display_name, action)}"
+
+
+def _default_agent_remark(action: PokerAction) -> str:
+    return {
+        ActionType.CHECK: "Let me keep this steady.",
+        ActionType.CALL: "That price is workable.",
+        ActionType.BET: "Time to test the table.",
+        ActionType.RAISE_TO: "I want a little more pressure here.",
+        ActionType.ALL_IN: "No more half measures.",
+        ActionType.FOLD: "This one can go.",
+    }.get(action.type, "I have a move.")
+
+
+def _agent_action_declaration(display_name: str, action: PokerAction) -> str:
     if action.amount is None:
         return f"{display_name} {action.type.replace('_', ' ')}."
     return f"{display_name} {action.type.replace('_', ' ')} {action.amount}."

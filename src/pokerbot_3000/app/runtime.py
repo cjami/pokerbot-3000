@@ -35,12 +35,13 @@ if TYPE_CHECKING:
     from pokerbot_3000.domain.models import (
         GameEvent,
         HumanActionInput,
+        HumanTableTalkInput,
         OperatorControlResult,
         PrivateAgentState,
         PrivateCardObservation,
         PublicGameState,
     )
-    from pokerbot_3000.ports.llm import AgentDecision, ImageFrame
+    from pokerbot_3000.ports.llm import AgentBanterDecision, AgentDecision, ImageFrame
     from pokerbot_3000.ports.perception import PrivateCardSource, PublicVisionSource, RevealedCardsSource
     from pokerbot_3000.voice.coordinator import VoiceActionCoordinator as VoiceActionCoordinatorType
 
@@ -74,6 +75,24 @@ class AgentDecisionSource(Protocol):
         """Choose one poker action for the active agent."""
 
 
+class AgentBanterSource(Protocol):
+    """Minimal LLM contract for optional poker table talk."""
+
+    async def respond_to_human_table_talk(
+        self,
+        request: HumanTableTalkInput,
+        public_state: PublicGameState,
+    ) -> AgentBanterDecision:
+        """Respond to direct human speech addressed to one agent."""
+
+    async def react_to_human_action(
+        self,
+        event: GameEvent,
+        public_state: PublicGameState,
+    ) -> AgentBanterDecision:
+        """Optionally react to one committed human poker action."""
+
+
 class LazyGemmaAgentDecisionSource:
     """Lazy Cerebras/Gemma agent decision source."""
 
@@ -91,6 +110,34 @@ class LazyGemmaAgentDecisionSource:
         if self._llm is None:
             self._llm = CerebrasLlmClient(CerebrasConfig.from_env())
         return await self._llm.decide_agent_action(agent_id, public_state, private_state)
+
+
+class LazyGemmaAgentBanterSource:
+    """Lazy Cerebras/Gemma table-talk source."""
+
+    def __init__(self) -> None:
+        """Create a lazy source without reading environment yet."""
+        self._llm: CerebrasLlmClient | None = None
+
+    async def respond_to_human_table_talk(
+        self,
+        request: HumanTableTalkInput,
+        public_state: PublicGameState,
+    ) -> AgentBanterDecision:
+        """Generate a response to human-addressed agent speech."""
+        if self._llm is None:
+            self._llm = CerebrasLlmClient(CerebrasConfig.from_env())
+        return await self._llm.respond_to_human_table_talk(request, public_state)
+
+    async def react_to_human_action(
+        self,
+        event: GameEvent,
+        public_state: PublicGameState,
+    ) -> AgentBanterDecision:
+        """Optionally generate a reaction to one committed human action."""
+        if self._llm is None:
+            self._llm = CerebrasLlmClient(CerebrasConfig.from_env())
+        return await self._llm.react_to_human_action(event, public_state)
 
 
 class DashboardEventBroadcaster:
@@ -341,6 +388,7 @@ class DashboardRuntime:
     private_cards_processor: PrivateCardsFrameProcessor
     revealed_cards_processor: RevealedCardsFrameProcessor
     agent_action_processor: AgentActionProcessor | None = None
+    agent_banter_source: AgentBanterSource | None = None
     voice_coordinator: VoiceActionCoordinatorType | None = None
     browser_voice_input: BrowserAudioInput | None = None
     voice_client_factory: VoiceClientFactory = _default_voice_client_factory
@@ -385,7 +433,12 @@ class DashboardRuntime:
             broadcaster=broadcaster,
             after_events=handle_events,
         )
+        agent_banter_source = LazyGemmaAgentBanterSource()
         browser_voice_input = BrowserAudioInput()
+
+        async def submit_table_talk(request: HumanTableTalkInput) -> ExternalInputResult:
+            return await runtime_ref["runtime"].build_human_table_talk_result(request)
+
         voice_coordinator = VoiceActionCoordinator(
             orchestrator=orchestrator,
             adapters=VoiceActionAdapters(
@@ -394,6 +447,7 @@ class DashboardRuntime:
                 transcriber=ParakeetSpeechTranscriber(),
                 parser=DeterministicVoiceCommandParser(),
             ),
+            submit_table_talk=submit_table_talk,
             after_events=handle_events,
             publish_snapshot=broadcaster.publish_snapshot,
         )
@@ -404,6 +458,7 @@ class DashboardRuntime:
             private_cards_processor=private_cards_processor,
             revealed_cards_processor=revealed_cards_processor,
             agent_action_processor=agent_action_processor,
+            agent_banter_source=agent_banter_source,
             voice_coordinator=voice_coordinator,
             browser_voice_input=browser_voice_input,
         )
@@ -516,9 +571,25 @@ class DashboardRuntime:
     async def submit_human_action(self, request: HumanActionInput) -> ExternalInputResult:
         """Consume a human action and drain any resulting agent turns."""
         result = self.orchestrator.submit_human_action(request)
+        if result.accepted:
+            reaction_events = await self._maybe_queue_human_action_reaction(result.events)
+            if reaction_events:
+                result = result.model_copy(
+                    update={
+                        "events": [*result.events, *reaction_events],
+                        "state": self.orchestrator.public_state(),
+                    },
+                )
         await self.handle_new_events(result.events)
         await self.broadcaster.publish_snapshot()
         return await self._with_pending_agent_events(result)
+
+    async def submit_human_table_talk(self, request: HumanTableTalkInput) -> ExternalInputResult:
+        """Record human-addressed agent speech and publish the targeted response."""
+        result = await self.build_human_table_talk_result(request)
+        await self.handle_new_events(result.events)
+        await self.broadcaster.publish_snapshot()
+        return result
 
     async def record_client_private_cards(
         self,
@@ -547,6 +618,56 @@ class DashboardRuntime:
                 "state": self.orchestrator.public_state(),
             },
         )
+
+    async def build_human_table_talk_result(self, request: HumanTableTalkInput) -> ExternalInputResult:
+        """Build a table-talk result without publishing side effects."""
+        speech = _fallback_table_talk_reply(request.target_agent_id)
+        reaction: dict[str, object] = {"intent": "table_talk_reply"}
+        emotion = "calm"
+        if self.agent_banter_source is not None:
+            try:
+                decision = await self.agent_banter_source.respond_to_human_table_talk(
+                    request,
+                    self.orchestrator.public_state(),
+                )
+            except Exception:  # noqa: BLE001
+                decision = None
+            if decision is not None and decision.speech:
+                speech = decision.speech
+                reaction = decision.reaction
+                emotion = decision.emotion
+        return self.orchestrator.submit_human_table_talk(request, speech=speech, reaction=reaction, emotion=emotion)
+
+    async def _maybe_queue_human_action_reaction(self, events: list[GameEvent]) -> list[GameEvent]:
+        if self.agent_banter_source is None:
+            return []
+        action_event = next(
+            (
+                event
+                for event in events
+                if event.event_type == EventType.ACTION_COMMITTED and event.payload.get("seat") == 1
+            ),
+            None,
+        )
+        if action_event is None:
+            return []
+        try:
+            decision = await self.agent_banter_source.react_to_human_action(
+                action_event,
+                self.orchestrator.public_state(),
+            )
+        except Exception:  # noqa: BLE001
+            return []
+        if decision.agent_id is None or not decision.speech:
+            return []
+        event = self.orchestrator.record_agent_banter_response(
+            decision.agent_id,
+            decision.speech,
+            reaction=decision.reaction,
+            intent="human_action_reaction",
+            emotion=decision.emotion,
+        )
+        return [event]
 
     async def handle_new_events(self, events: list[GameEvent]) -> None:
         """Handle side effects for newly appended orchestrator events."""
@@ -656,6 +777,11 @@ class DashboardRuntime:
 
 def _public_error_message(exc: Exception) -> str:
     return str(exc) or exc.__class__.__name__
+
+
+def _fallback_table_talk_reply(agent_id: str) -> str:
+    display_name = {"reachy": "Reachy", "eliza": "Eliza"}.get(agent_id, "I")
+    return f"{display_name} heard you."
 
 
 def _is_orchestrator_speech_event(event: GameEvent) -> bool:

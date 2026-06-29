@@ -22,6 +22,7 @@ class PromptCatalog:
     read_hole_cards_user: str
     decide_agent_action_system: str
     generate_table_talk_system: str
+    agent_banter_system: str
 
 
 @cache
@@ -36,6 +37,7 @@ def load_prompts() -> PromptCatalog:
         read_hole_cards_user=_read_prompt("read_hole_cards.user.md"),
         decide_agent_action_system=_read_prompt("decide_agent_action.system.md"),
         generate_table_talk_system=_read_prompt("generate_table_talk.system.md"),
+        agent_banter_system=_read_prompt("agent_banter.system.md"),
     )
 
 

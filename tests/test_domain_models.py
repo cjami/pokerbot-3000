@@ -5,6 +5,7 @@ from pokerbot_3000.domain.cards import Card, CardRank, CardSuit
 from pokerbot_3000.domain.models import (
     ActionType,
     HumanActionInput,
+    HumanTableTalkInput,
     PokerAction,
     PrivateCardObservation,
     PublicGameState,
@@ -46,6 +47,21 @@ def test_human_action_input_accepts_voice_shape():
 
     assert request.seat == 1
     assert request.action.amount == 200
+
+
+def test_human_table_talk_input_accepts_addressed_agent_shape():
+    request = HumanTableTalkInput.model_validate(
+        {
+            "target_agent_id": "reachy",
+            "message": "what do you think",
+            "raw_transcript": "Reachy, what do you think?",
+            "confidence": 0.9,
+        }
+    )
+
+    assert request.seat == 1
+    assert request.source == "voice"
+    assert request.target_agent_id == "reachy"
 
 
 def test_public_state_rejects_impossible_board_counts():

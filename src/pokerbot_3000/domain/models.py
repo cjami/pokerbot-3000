@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -63,6 +63,7 @@ class EventType(StrEnum):
     BLIND_POSTED = "blind_posted"
     ACTION_PROPOSED = "action_proposed"
     ACTION_COMMITTED = "action_committed"
+    HUMAN_TABLE_TALK = "human_table_talk"
     AGENT_DECISION = "agent_decision"
     AGENT_DECISION_FAILED = "agent_decision_failed"
     ENGINE_PAUSED = "engine_paused"
@@ -333,6 +334,17 @@ class HumanActionInput(PokerBaseModel):
     source: str = "voice"
     seat: int = Field(default=1, ge=1, le=3)
     action: PokerAction
+    raw_transcript: str | None = None
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+
+
+class HumanTableTalkInput(PokerBaseModel):
+    """Human speech addressed to one agent while the human action is pending."""
+
+    source: str = "voice"
+    seat: int = Field(default=1, ge=1, le=3)
+    target_agent_id: Literal["reachy", "eliza"]
+    message: str = Field(min_length=1, max_length=300)
     raw_transcript: str | None = None
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
 

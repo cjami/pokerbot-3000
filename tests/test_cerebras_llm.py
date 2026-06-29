@@ -5,6 +5,7 @@ from typing import Any, cast
 
 import pytest
 
+from pokerbot_3000.domain.models import HumanTableTalkInput
 from pokerbot_3000.llm.cerebras import (
     CEREBRAS_API_KEY_ENV,
     CEREBRAS_MODEL_ENV,
@@ -14,6 +15,7 @@ from pokerbot_3000.llm.cerebras import (
     JsonObject,
 )
 from pokerbot_3000.llm.prompt_catalog import load_prompts
+from pokerbot_3000.orchestrator import InMemoryOrchestrator
 from pokerbot_3000.ports.llm import ImageFrame
 
 
@@ -62,6 +64,52 @@ def test_cerebras_access_check_uses_models_and_chat_endpoints():
 
 def test_prompt_catalog_is_cached():
     assert load_prompts() is load_prompts()
+
+
+def test_human_table_talk_uses_strict_banter_schema():
+    captured_payloads: list[JsonObject] = []
+
+    def fake_transport(url: str, payload: JsonObject, _headers: Mapping[str, str], _timeout: float) -> JsonObject:
+        captured_payloads.append(payload)
+        assert url.endswith("/chat/completions")
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "agent_id": "eliza",
+                                "speech": "I am listening.",
+                                "reaction": {"intent": "table_talk_reply"},
+                                "emotion": "confused",
+                                "confidence": 0.91,
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    client = CerebrasLlmClient(CerebrasConfig(api_key="test-key"), transport=fake_transport)
+    request = HumanTableTalkInput(target_agent_id="eliza", message="are you feeling lucky")
+
+    result = asyncio.run(client.respond_to_human_table_talk(request, InMemoryOrchestrator().public_state()))
+
+    payload = captured_payloads[0]
+    assert payload["temperature"] == 0.0
+    response_format = payload["response_format"]
+    assert isinstance(response_format, dict)
+    json_schema = cast("dict[str, Any]", response_format["json_schema"])
+    assert json_schema["strict"] is True
+    assert json_schema["name"] == "agent_banter"
+    schema = cast("dict[str, Any]", json_schema["schema"])
+    properties = cast("dict[str, Any]", schema["properties"])
+    assert properties["agent_id"]["anyOf"][0]["enum"] == ["reachy", "eliza"]
+    assert properties["emotion"]["enum"] == ["calm", "confident", "celebrate", "confused", "sad"]
+    assert result.agent_id == "eliza"
+    assert result.speech == "I am listening."
+    assert result.reaction == {"intent": "table_talk_reply"}
+    assert result.emotion == "confused"
 
 
 def test_read_hole_cards_uses_strict_schema_and_python_metadata():

@@ -15,6 +15,7 @@ from pokerbot_3000.domain.models import (
     ExternalInputResult,
     GameEvent,
     HumanActionInput,
+    HumanTableTalkInput,
     OperatorControlResult,
     PrivateCardFrameInput,
     PrivateCardObservation,
@@ -83,6 +84,11 @@ def _create_input_router(runtime: DashboardRuntime) -> APIRouter:
     async def submit_human_action(request: HumanActionInput) -> ExternalInputResult:
         """Consume human action input and advance the engine until blocked."""
         return await runtime.submit_human_action(request)
+
+    @router.post("/inputs/human-table-talk", response_model=ExternalInputResult)
+    async def submit_human_table_talk(request: HumanTableTalkInput) -> ExternalInputResult:
+        """Consume human speech addressed to Reachy or Eliza without advancing the action."""
+        return await runtime.submit_human_table_talk(request)
 
     @router.post("/clients/{agent_id}/private-cards", response_model=ExternalInputResult)
     async def record_client_private_cards(
