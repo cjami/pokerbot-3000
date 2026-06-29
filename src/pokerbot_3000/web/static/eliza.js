@@ -158,10 +158,15 @@ function playAudio(audioUrl) {
 }
 
 async function loadCameraDevices() {
-  if (!cameraDevice || !navigator.mediaDevices?.enumerateDevices) {
-    setText(cardStatus, "camera unavailable");
+  if (!cameraDevice) {
     return;
   }
+  if (!navigator.mediaDevices?.enumerateDevices) {
+    setText(cardStatus, cameraUnavailableMessage());
+    return;
+  }
+
+  const selectedDevice = cameraDevice.value;
   const devices = await navigator.mediaDevices.enumerateDevices();
   const cameras = devices.filter((device) => device.kind === "videoinput");
   cameraDevice.replaceChildren();
@@ -175,11 +180,17 @@ async function loadCameraDevices() {
     option.textContent = device.label || `Camera ${index + 1}`;
     cameraDevice.append(option);
   }
+  cameraDevice.value = selectedDevice;
+  if (cameras.length === 0) {
+    setText(cardStatus, "no cameras found");
+  } else {
+    setText(cardStatus, cameraStream ? "camera ready" : "camera idle");
+  }
 }
 
 async function ensureCameraStream() {
   if (!cameraPreview || !navigator.mediaDevices?.getUserMedia) {
-    setText(cardStatus, "camera unavailable");
+    setText(cardStatus, cameraUnavailableMessage());
     return;
   }
   if (cameraStream) {
@@ -192,6 +203,10 @@ async function ensureCameraStream() {
   });
   cameraPreview.srcObject = cameraStream;
   await loadCameraDevices();
+}
+
+function cameraUnavailableMessage() {
+  return globalThis.isSecureContext ? "camera unavailable" : "HTTPS or localhost required";
 }
 
 function stopCameraStream() {
@@ -254,5 +269,6 @@ captureButton?.addEventListener("click", () => {
 });
 
 setText(face, DEFAULT_FACE);
+await loadCameraDevices().catch(() => setText(cardStatus, "camera unavailable"));
 await ensureCameraStream().catch(() => setText(cardStatus, "camera permission needed"));
 connectEvents();

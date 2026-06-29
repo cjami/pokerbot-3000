@@ -109,7 +109,7 @@
   }
 
   .client-face {
-    @apply grid aspect-square w-full max-w-sm place-items-center rounded-lg border border-neutral-300 bg-white text-[12rem] leading-none shadow-sm;
+    @apply grid aspect-square w-full max-w-xl place-items-center rounded-lg border border-neutral-300 bg-white text-[15rem] leading-none shadow-sm sm:text-[19rem] lg:max-w-2xl lg:text-[24rem];
     font-family: "Noto Emoji", emoji, sans-serif;
   }
 
@@ -118,15 +118,15 @@
   }
 
   .client-shell {
-    @apply mx-auto grid min-h-screen w-full max-w-5xl gap-4 px-4 py-5 sm:px-6 lg:grid-cols-[1.2fr_1fr] lg:px-8;
+    @apply mx-auto grid min-h-screen w-full max-w-7xl gap-4 px-4 py-5 sm:px-6 lg:grid-cols-[1.65fr_1fr] lg:px-8;
   }
 
   .client-speech {
-    @apply min-h-16 max-w-lg text-center text-2xl font-black leading-tight;
+    @apply min-h-16 max-w-2xl text-center text-3xl font-black leading-tight;
   }
 
   .client-stage {
-    @apply flex flex-col items-center justify-center gap-4 rounded-lg border border-neutral-300 bg-felt/5 p-4 shadow-sm lg:row-span-2;
+    @apply flex flex-col items-center justify-center gap-5 rounded-lg border border-neutral-300 bg-felt/5 p-5 shadow-sm lg:row-span-2;
   }
 
   .client-status-row {

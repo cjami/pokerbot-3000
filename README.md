@@ -46,6 +46,8 @@ POKERBOT_VAD_MAX_PHRASE_MS=8000
 The dashboard uses the browser camera API for public-board frames, so OBS Virtual Camera and other browser-visible devices can be selected directly in the app.
 Human voice input uses the browser microphone selector and streams 16 kHz mono PCM to the server-side Silero + Parakeet pipeline.
 Eliza's thin client is available at `http://127.0.0.1:8000/clients/eliza`.
+For another machine on the local network, start the app with `make app` and open `http://<host-ip>:8000/clients/eliza`.
+Chrome and Edge block camera access on insecure LAN origins by default; on the Eliza machine, open `chrome://flags/#unsafely-treat-insecure-origin-as-secure`, add `http://<host-ip>:8000`, enable the flag, and relaunch the browser.
 Reachy Mini can be connected with `uv run pokerbot-reachy-bridge`; install optional robot dependencies with `uv sync --extra reachy`.
 
 Check model access without starting the web server:
