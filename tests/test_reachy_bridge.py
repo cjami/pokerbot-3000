@@ -19,12 +19,17 @@ from pokerbot_3000.reachy_bridge import (
 
 
 class _FakeHttpClient:
-    def __init__(self, actions: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        actions: list[str] | None = None,
+        private_frame_results: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.posts: list[tuple[str, dict[str, Any]]] = []
         self.state: dict[str, Any] = {"waiting_for": None}
         self.events: list[dict[str, Any]] = []
         self.audio_by_path: dict[str, bytes] = {}
         self.actions = actions
+        self.private_frame_results = private_frame_results or []
 
     def get_json(self, path: str) -> dict[str, Any] | list[dict[str, Any]]:
         if self.actions is not None:
@@ -44,6 +49,8 @@ class _FakeHttpClient:
         self.posts.append((path, payload))
         if self.actions is not None:
             self.actions.append(f"post:{path}:{payload.get('connection', '')}")
+        if path == "/api/clients/reachy/private-cards/frame" and self.private_frame_results:
+            return self.private_frame_results.pop(0)
         return {"accepted": True, "reason": "ok"}
 
 
@@ -177,6 +184,45 @@ def test_reachy_bridge_submits_private_card_frame_for_targeted_request():
     ]
 
 
+def test_reachy_bridge_retries_private_card_frames_until_accepted():
+    http = _FakeHttpClient(
+        private_frame_results=[
+            {"accepted": False, "reason": "Expected 2 private cards for Reachy, detected 0."},
+            {"accepted": True, "reason": "ok"},
+        ]
+    )
+    http.events = [
+        {
+            "event_id": "evt_cards",
+            "payload": {
+                "target_client": "reachy",
+                "intent": "request_private_cards",
+                "emotion": "calm",
+                "gesture": "look_down",
+            },
+        }
+    ]
+    reachy = _FakeReachy()
+    bridge = ReachyBridge(config=BridgeConfig(capture_settle_seconds=0), http=http, reachy=reachy)
+
+    bridge.tick()
+    bridge.tick()
+    bridge.tick()
+
+    assert reachy.capture_count == 2
+    assert reachy.presentations == [("calm", None, "look_down")]
+    assert [post[0] for post in http.posts] == [
+        "/api/clients/reachy/private-cards/frame",
+        "/api/clients/reachy/status",
+        "/api/clients/reachy/private-cards/frame",
+    ]
+    assert http.posts[1][1] == {
+        "connection": "connected",
+        "status": "Reachy private-card frame pending",
+        "detail": "Expected 2 private cards for Reachy, detected 0.",
+    }
+
+
 def test_reachy_bridge_reports_private_card_capture_error_without_stopping():
     http = _FakeHttpClient()
     http.events = [
@@ -191,7 +237,7 @@ def test_reachy_bridge_reports_private_card_capture_error_without_stopping():
     bridge.tick()
     bridge.tick()
 
-    assert reachy.capture_count == 1
+    assert reachy.capture_count == 2
     assert http.posts == [
         (
             "/api/clients/reachy/status",

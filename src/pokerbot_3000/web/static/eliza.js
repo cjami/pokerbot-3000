@@ -147,15 +147,19 @@ async function express(event) {
   if (!line) {
     return;
   }
-  const response = await fetch(`/api/voice/eliza/${event.event_id}`);
-  if (!response.ok) {
-    return;
-  }
-  const audioUrl = URL.createObjectURL(await response.blob());
   try {
-    await playAudio(audioUrl);
+    const response = await fetch(`/api/voice/eliza/${event.event_id}`);
+    if (!response.ok) {
+      return;
+    }
+    const audioUrl = URL.createObjectURL(await response.blob());
+    try {
+      await playAudio(audioUrl);
+    } finally {
+      URL.revokeObjectURL(audioUrl);
+    }
   } finally {
-    URL.revokeObjectURL(audioUrl);
+    await notifyPresentationComplete(event.event_id);
   }
 }
 
@@ -174,6 +178,14 @@ function playAudio(audioUrl) {
     audio.addEventListener("error", () => reject(new Error("Audio playback failed.")), { once: true });
     audio.play().catch(reject);
   });
+}
+
+async function notifyPresentationComplete(eventId) {
+  try {
+    await fetch(`/api/presentation/${eventId}/complete`, { method: "POST" });
+  } catch {
+    // Best-effort signal; the next snapshot/poll will keep the client visible.
+  }
 }
 
 async function loadCameraDevices() {

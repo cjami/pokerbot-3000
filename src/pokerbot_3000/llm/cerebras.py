@@ -332,11 +332,10 @@ class CerebrasLlmClient:
             "messages": cast("JsonValue", messages),
             "max_tokens": max_tokens,
             "temperature": temperature,
+            "reasoning_effort": "none",
         }
         if response_format is not None:
             payload["response_format"] = response_format
-        if _messages_include_image(messages):
-            payload["reasoning_effort"] = "none"
         response = await self._request_json("chat/completions", payload)
         return _first_message_text(response)
 
@@ -520,16 +519,6 @@ def _first_message_text(response: JsonObject) -> str:
         return "\n".join(text_parts)
     msg = "Cerebras chat message did not contain text content."
     raise CerebrasClientError(msg)
-
-
-def _messages_include_image(messages: list[JsonObject]) -> bool:
-    return any(_content_includes_image(message.get("content")) for message in messages)
-
-
-def _content_includes_image(content: object) -> bool:
-    if not isinstance(content, list):
-        return False
-    return any(isinstance(part, dict) and part.get("type") == "image_url" for part in content)
 
 
 def _extract_json_text(text: str) -> str:

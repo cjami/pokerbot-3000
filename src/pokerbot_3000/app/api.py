@@ -41,6 +41,7 @@ def create_api_router(runtime: DashboardRuntime) -> APIRouter:
     router.include_router(_create_vision_router(runtime))
     router.include_router(_create_stale_voice_router())
     router.include_router(_create_voice_router(runtime))
+    router.include_router(_create_presentation_router(runtime))
     return router
 
 
@@ -164,6 +165,17 @@ def _create_voice_router(runtime: DashboardRuntime) -> APIRouter:
         except ElevenLabsClientError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         return Response(content=audio, media_type="audio/mpeg")
+
+    return router
+
+
+def _create_presentation_router(runtime: DashboardRuntime) -> APIRouter:
+    router = APIRouter()
+
+    @router.post("/presentation/{event_id}/complete", response_model=list[GameEvent])
+    async def complete_presentation(event_id: str) -> list[GameEvent]:
+        """Mark one client presentation event complete and resume queued work."""
+        return await runtime.complete_presentation(event_id)
 
     return router
 

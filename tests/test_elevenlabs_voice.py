@@ -70,7 +70,7 @@ def test_elevenlabs_client_uses_flash_model_and_orchestrator_voice():
 
     assert audio == b"mp3-bytes"
     call = calls[0]
-    assert call["url"] == "https://api.elevenlabs.io/v1/text-to-speech/voice-123?output_format=mp3_44100_128"
+    assert call["url"] == "https://api.elevenlabs.io/v1/text-to-speech/voice-123?output_format=mp3_22050_32"
     assert call["payload"] == {
         "text": "Please lay out the flop.",
         "model_id": DEFAULT_ELEVENLABS_MODEL,
@@ -107,7 +107,7 @@ def test_elevenlabs_client_uses_eliza_voice_when_configured():
     audio = asyncio.run(client.synthesize_eliza("Eliza checks."))
 
     assert audio == b"eliza-mp3"
-    assert calls[0]["url"] == "https://api.elevenlabs.io/v1/text-to-speech/eliza-456?output_format=mp3_44100_128"
+    assert calls[0]["url"] == "https://api.elevenlabs.io/v1/text-to-speech/eliza-456?output_format=mp3_22050_32"
 
 
 def test_elevenlabs_client_requires_eliza_voice_for_eliza_speech():
@@ -132,7 +132,7 @@ def test_elevenlabs_client_uses_reachy_voice_when_configured():
     audio = asyncio.run(client.synthesize_reachy("Reachy calls."))
 
     assert audio == b"reachy-mp3"
-    assert calls[0]["url"] == "https://api.elevenlabs.io/v1/text-to-speech/reachy-789?output_format=mp3_44100_128"
+    assert calls[0]["url"] == "https://api.elevenlabs.io/v1/text-to-speech/reachy-789?output_format=mp3_22050_32"
 
 
 def test_elevenlabs_client_requires_reachy_voice_for_reachy_speech():

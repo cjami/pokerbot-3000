@@ -372,7 +372,7 @@ class AgentActionProcessor:
                 if self._after_events is not None:
                     await self._after_events(result.events)
                 await self._broadcaster.publish_snapshot()
-                if not result.accepted:
+                if not result.accepted or _events_include_agent_speech(result.events):
                     break
             return all_events
 
@@ -398,6 +398,8 @@ class DashboardRuntime:
     _voice_client: SpeechSynthesisClient | None = field(default=None, init=False)
     _audio_cache: dict[str, bytes] = field(default_factory=dict, init=False)
     _audio_tasks: dict[str, asyncio.Task[bytes]] = field(default_factory=dict, init=False)
+    _blocking_agent_speech_event_ids: set[str] = field(default_factory=set, init=False)
+    _completed_agent_speech_event_ids: set[str] = field(default_factory=set, init=False)
 
     @classmethod
     def create_default(cls) -> DashboardRuntime:
@@ -581,6 +583,7 @@ class DashboardRuntime:
     async def submit_human_action(self, request: HumanActionInput) -> ExternalInputResult:
         """Consume a human action and drain any resulting agent turns."""
         result = self.orchestrator.submit_human_action(request)
+        reaction_events: list[GameEvent] = []
         if result.accepted:
             reaction_events = await self._maybe_queue_human_action_reaction(result.events)
             if reaction_events:
@@ -592,6 +595,8 @@ class DashboardRuntime:
                 )
         await self.handle_new_events(result.events)
         await self.broadcaster.publish_snapshot()
+        if _events_include_agent_speech(reaction_events):
+            return result
         return await self._with_pending_agent_events(result)
 
     async def submit_human_table_talk(self, request: HumanTableTalkInput) -> ExternalInputResult:
@@ -614,9 +619,27 @@ class DashboardRuntime:
 
     async def process_pending_agent_actions(self) -> list[GameEvent]:
         """Drain pending Gemma agent decisions if configured."""
-        if self.agent_action_processor is None:
+        if self.agent_action_processor is None or self._has_uncompleted_agent_speech():
             return []
-        return await self.agent_action_processor.process_pending()
+        events = await self.agent_action_processor.process_pending()
+        if events:
+            await self.handle_new_events(events)
+        return events
+
+    async def complete_presentation(self, event_id: str) -> list[GameEvent]:
+        """Mark one agent speech event complete and resume pending agent work."""
+        if event_id not in self._blocking_agent_speech_event_ids:
+            return []
+        if event_id in self._completed_agent_speech_event_ids:
+            return []
+        result = self.orchestrator.complete_presentation(event_id)
+        events = result.events if result.accepted else []
+        if events:
+            await self.handle_new_events(events)
+        self._completed_agent_speech_event_ids.add(event_id)
+        agent_events = await self.process_pending_agent_actions()
+        await self.broadcaster.publish_snapshot()
+        return [*events, *agent_events]
 
     async def _with_pending_agent_events(self, result: ExternalInputResult) -> ExternalInputResult:
         agent_events = await self.process_pending_agent_actions()
@@ -684,6 +707,15 @@ class DashboardRuntime:
         for event in events:
             if _is_orchestrator_speech_event(event):
                 self._queue_orchestrator_synthesis(event.event_id)
+            elif _is_eliza_speech_event(event):
+                self._blocking_agent_speech_event_ids.add(event.event_id)
+                self._queue_eliza_synthesis(event.event_id)
+            elif _is_reachy_speech_event(event):
+                self._blocking_agent_speech_event_ids.add(event.event_id)
+                self._queue_reachy_synthesis(event.event_id)
+
+    def _has_uncompleted_agent_speech(self) -> bool:
+        return bool(self._blocking_agent_speech_event_ids - self._completed_agent_speech_event_ids)
 
     async def synthesize_orchestrator_event(self, event_id: str) -> bytes:
         """Return MPEG audio for one queued orchestrator speech event."""
@@ -846,6 +878,27 @@ def _is_orchestrator_speech_event(event: GameEvent) -> bool:
         and event.payload.get("voice") == "orchestrator"
         and isinstance(event.payload.get("speech"), str)
     )
+
+
+def _is_eliza_speech_event(event: GameEvent) -> bool:
+    return _is_agent_speech_event(event, ClientId.ELIZA)
+
+
+def _is_reachy_speech_event(event: GameEvent) -> bool:
+    return _is_agent_speech_event(event, ClientId.REACHY)
+
+
+def _is_agent_speech_event(event: GameEvent, client_id: ClientId) -> bool:
+    target_client = event.payload.get("target_client")
+    return (
+        event.event_type == EventType.PRESENTATION_COMMAND
+        and target_client in {client_id, client_id.value}
+        and isinstance(event.payload.get("speech"), str)
+    )
+
+
+def _events_include_agent_speech(events: list[GameEvent]) -> bool:
+    return any(_is_eliza_speech_event(event) or _is_reachy_speech_event(event) for event in events)
 
 
 def _audio_cache_key(voice: str, event_id: str) -> str:

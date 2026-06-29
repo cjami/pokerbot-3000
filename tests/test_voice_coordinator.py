@@ -269,8 +269,8 @@ def _open_human_action_after_flop(orchestrator: InMemoryOrchestrator) -> None:
         orchestrator.record_public_observation(
             PublicTableObservation(board_cards=flop, street_hint=Street.FLOP, confidence=0.9)
         )
-    orchestrator.submit_agent_decision(_decision("reachy", "check"))
-    orchestrator.submit_agent_decision(_decision("eliza", "check"))
+    _submit_agent_decision_and_complete(orchestrator, _decision("reachy", "check"))
+    _submit_agent_decision_and_complete(orchestrator, _decision("eliza", "check"))
 
 
 def _complete_preflop(orchestrator: InMemoryOrchestrator) -> None:
@@ -285,7 +285,7 @@ def _complete_preflop(orchestrator: InMemoryOrchestrator) -> None:
             confidence=0.89,
         ),
     )
-    orchestrator.submit_agent_decision(_decision("reachy", "call"))
+    _submit_agent_decision_and_complete(orchestrator, _decision("reachy", "call"))
     orchestrator.record_client_private_cards(
         "eliza",
         PrivateCardObservation(
@@ -296,7 +296,7 @@ def _complete_preflop(orchestrator: InMemoryOrchestrator) -> None:
             confidence=0.89,
         ),
     )
-    orchestrator.submit_agent_decision(_decision("eliza", "check"))
+    _submit_agent_decision_and_complete(orchestrator, _decision("eliza", "check"))
 
 
 def _decision(agent_id: str, action_type: str, amount: int | None = None) -> AgentDecision:
@@ -307,6 +307,22 @@ def _decision(agent_id: str, action_type: str, amount: int | None = None) -> Age
         reaction={"intent": "announce_action"},
         confidence=0.9,
     )
+
+
+def _submit_agent_decision_and_complete(orchestrator: InMemoryOrchestrator, decision: AgentDecision) -> None:
+    result = orchestrator.submit_agent_decision(decision)
+    presentation = next(
+        (
+            event
+            for event in result.events
+            if event.event_type == "presentation_command"
+            and event.payload.get("target_client") == decision.agent_id
+            and isinstance(event.payload.get("speech"), str)
+        ),
+        None,
+    )
+    if presentation is not None:
+        orchestrator.complete_presentation(presentation.event_id)
 
 
 def _card(rank: str, suit: str) -> Card:

@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 import logging
 import os
 import uuid
-import wave
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
@@ -37,9 +35,24 @@ type SpeechToTextTransport = Callable[[str, bytes, Mapping[str, str], float], Ma
 
 ELEVENLABS_STT_MODEL_ENV: Final = "ELEVENLABS_STT_MODEL"
 ELEVENLABS_STT_LANGUAGE_ENV: Final = "ELEVENLABS_STT_LANGUAGE"
-DEFAULT_ELEVENLABS_STT_MODEL: Final = "scribe_v1"
+ELEVENLABS_STT_KEYTERMS_ENV: Final = "ELEVENLABS_STT_KEYTERMS"
+DEFAULT_ELEVENLABS_STT_MODEL: Final = "scribe_v2"
 DEFAULT_ELEVENLABS_STT_LANGUAGE: Final = "en"
 PCM_SAMPLE_WIDTH_BYTES: Final = 2
+DEFAULT_KEYTERMS: Final = (
+    "fold",
+    "check",
+    "call",
+    "raise",
+    "raise to",
+    "bet",
+    "all in",
+    "one hundred",
+    "two hundred",
+    "chips",
+    "Reachy",
+    "Eliza",
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -51,6 +64,7 @@ class ElevenLabsSpeechTranscriptionConfig:
     api_key: str
     model: str = DEFAULT_ELEVENLABS_STT_MODEL
     language: str | None = DEFAULT_ELEVENLABS_STT_LANGUAGE
+    keyterms: tuple[str, ...] = DEFAULT_KEYTERMS
     base_url: str = DEFAULT_ELEVENLABS_BASE_URL
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
 
@@ -68,6 +82,7 @@ class ElevenLabsSpeechTranscriptionConfig:
             api_key=api_key,
             model=os.getenv(ELEVENLABS_STT_MODEL_ENV, DEFAULT_ELEVENLABS_STT_MODEL),
             language=_env_optional(ELEVENLABS_STT_LANGUAGE_ENV, DEFAULT_ELEVENLABS_STT_LANGUAGE),
+            keyterms=_env_terms(ELEVENLABS_STT_KEYTERMS_ENV, DEFAULT_KEYTERMS),
             base_url=_normalized_base_url(os.getenv(ELEVENLABS_BASE_URL_ENV, DEFAULT_ELEVENLABS_BASE_URL)),
             timeout_seconds=_env_float(ELEVENLABS_TIMEOUT_ENV, DEFAULT_TIMEOUT_SECONDS),
         )
@@ -91,8 +106,8 @@ class ElevenLabsSpeechTranscriber:
 
     def _transcribe_sync(self, segment: AudioChunk) -> VoiceTranscript:
         config = self._config or ElevenLabsSpeechTranscriptionConfig.from_env()
-        audio = _wav_bytes(segment)
-        LOGGER.info("Sending voice phrase to ElevenLabs speech-to-text (%d WAV bytes).", len(audio))
+        audio = _pcm_bytes(segment)
+        LOGGER.info("Sending voice phrase to ElevenLabs speech-to-text (%d PCM bytes).", len(audio))
         body, content_type = _multipart_body(config, audio)
         headers = {
             "Accept": "application/json",
@@ -111,34 +126,37 @@ class ElevenLabsSpeechTranscriber:
         return VoiceTranscript(text=text, confidence=1.0)
 
 
-def _wav_bytes(segment: AudioChunk) -> bytes:
+def _pcm_bytes(segment: AudioChunk) -> bytes:
     if segment.sample_width != PCM_SAMPLE_WIDTH_BYTES:
         msg = f"Expected 16-bit PCM audio, received sample width {segment.sample_width}."
         raise VoiceRuntimeError(msg)
-
-    buffer = io.BytesIO()
-    with wave.open(buffer, "wb") as wav_file:
-        wav_file.setnchannels(1)
-        wav_file.setsampwidth(segment.sample_width)
-        wav_file.setframerate(segment.sample_rate)
-        wav_file.writeframes(segment.pcm)
-    return buffer.getvalue()
+    return segment.pcm
 
 
 def _multipart_body(config: ElevenLabsSpeechTranscriptionConfig, audio: bytes) -> tuple[bytes, str]:
-    fields = {"model_id": config.model}
+    fields: list[tuple[str, str]] = [
+        ("model_id", config.model),
+        ("file_format", "pcm_s16le_16"),
+        ("tag_audio_events", "false"),
+        ("diarize", "false"),
+        ("timestamps_granularity", "none"),
+        ("temperature", "0"),
+    ]
+    if config.model == "scribe_v2":
+        fields.append(("no_verbatim", "true"))
     if config.language:
-        fields["language_code"] = config.language
+        fields.append(("language_code", config.language))
+    fields.extend(("keyterms", term) for term in config.keyterms)
 
     boundary = f"pokerbot-{uuid.uuid4().hex}"
     body = bytearray()
-    for name, value in fields.items():
+    for name, value in fields:
         body.extend(f"--{boundary}\r\n".encode())
         body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
         body.extend(f"{value}\r\n".encode())
     body.extend(f"--{boundary}\r\n".encode())
-    body.extend(b'Content-Disposition: form-data; name="file"; filename="speech.wav"\r\n')
-    body.extend(b"Content-Type: audio/wav\r\n\r\n")
+    body.extend(b'Content-Disposition: form-data; name="file"; filename="speech.pcm"\r\n')
+    body.extend(b"Content-Type: application/octet-stream\r\n\r\n")
     body.extend(audio)
     body.extend(f"\r\n--{boundary}--\r\n".encode())
     return bytes(body), f"multipart/form-data; boundary={boundary}"
@@ -218,6 +236,13 @@ def _env_float(name: str, default: float) -> float:
 def _env_optional(name: str, default: str) -> str | None:
     value = os.getenv(name, default).strip()
     return value or None
+
+
+def _env_terms(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return tuple(term.strip() for term in raw.split(",") if term.strip())
 
 
 def _trim(value: str, max_length: int = 500) -> str:

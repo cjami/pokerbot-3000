@@ -97,6 +97,7 @@ def test_human_table_talk_uses_strict_banter_schema():
 
     payload = captured_payloads[0]
     assert payload["temperature"] == 0.0
+    assert payload["reasoning_effort"] == "none"
     response_format = payload["response_format"]
     assert isinstance(response_format, dict)
     json_schema = cast("dict[str, Any]", response_format["json_schema"])

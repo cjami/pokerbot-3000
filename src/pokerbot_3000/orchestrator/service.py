@@ -83,6 +83,7 @@ class InMemoryOrchestrator:
         self._last_aggressor_by_street: dict[Street, int] = {}
         self._showdown_reveals: dict[int, list[Card]] = {}
         self._all_in_runout = False
+        self._pending_presentation_event_id: str | None = None
         self._append_event(
             EventType.SYSTEM,
             source="orchestrator",
@@ -323,17 +324,31 @@ class InMemoryOrchestrator:
                 "known_private_card_count": len(self._private_states[agent_id].hole_cards),
             },
         )
-        self._queue_agent_presentation(
+        presentation = self._queue_agent_presentation(
             agent_id,
             _agent_action_speech(profile.display_name, decision.action, decision.speech),
             reaction=decision.reaction,
             intent=_reaction_intent(decision.reaction),
             presentation=(_emotion_for_action(decision.action.type), _gesture_for_action(decision.action.type)),
         )
+        self._pause_for_agent_presentation(agent_id, presentation.event_id)
+        return ExternalInputResult(
+            accepted=True,
+            reason=f"{profile.display_name} agent decision consumed; waiting for presentation to finish.",
+            events=self.events_since(event_start),
+            state=self.public_state(),
+        )
+
+    def complete_presentation(self, event_id: str) -> ExternalInputResult:
+        """Resume orchestration after an agent presentation has finished."""
+        event_start = len(self._events)
+        if self._pending_presentation_event_id != event_id:
+            return self._external_rejection("The engine is not waiting for that presentation event.")
+        self._pending_presentation_event_id = None
         self._advance_after_action()
         return ExternalInputResult(
             accepted=True,
-            reason=f"{profile.display_name} agent decision consumed.",
+            reason="Presentation complete; engine advanced until the next external input.",
             events=self.events_since(event_start),
             state=self.public_state(),
         )
@@ -424,6 +439,28 @@ class InMemoryOrchestrator:
             return self._external_rejection(f"The engine is not waiting for private cards from {agent_id}.")
 
         event_start = len(self._events)
+        validation_error = self._private_cards_validation_error(agent_id, observation)
+        if validation_error is not None:
+            self._append_event(
+                EventType.PRIVATE_CARD_OBSERVATION,
+                source=observation.source,
+                summary=f"Rejected private card input from thin client {agent_id}: {validation_error}",
+                payload={
+                    "agent_id": agent_id,
+                    "seat": observation.seat,
+                    "hole_card_count": len(observation.hole_cards),
+                    "source": observation.source,
+                    "confidence": observation.confidence,
+                    "error": validation_error,
+                    "notes": observation.notes,
+                },
+            )
+            return ExternalInputResult(
+                accepted=False,
+                reason=validation_error,
+                events=self.events_since(event_start),
+                state=self.public_state(),
+            )
         self._store_private_cards(agent_id, observation)
         self._pause_for_agent_action(agent_id)
         return ExternalInputResult(
@@ -544,6 +581,7 @@ class InMemoryOrchestrator:
         self._last_aggressor_by_street = {}
         self._showdown_reveals = {}
         self._all_in_runout = False
+        self._pending_presentation_event_id = None
         if clear_private:
             self._private_states = self._build_private_states()
 
@@ -799,6 +837,16 @@ class InMemoryOrchestrator:
             return "Previously committed board cards changed."
         return None
 
+    def _private_cards_validation_error(self, agent_id: str, observation: PrivateCardObservation) -> str | None:
+        profile = self._agent_profiles[agent_id]
+        if observation.seat != profile.seat:
+            return f"Expected private cards for S{profile.seat}, detected S{observation.seat}."
+        if len(observation.hole_cards) != HOLE_CARD_COUNT:
+            return f"Expected 2 private cards for {profile.display_name}, detected {len(observation.hole_cards)}."
+        if len(set(_board_key(observation.hole_cards))) != len(observation.hole_cards):
+            return "Detected duplicate private card."
+        return None
+
     def _commit_public_board(self, observation: PublicTableObservation) -> None:
         cards = observation.board_cards
         self._state.board = cards
@@ -990,6 +1038,26 @@ class InMemoryOrchestrator:
             source="orchestrator",
             summary=f"Engine paused for {profile.display_name} Gemma decision.",
             payload=self._state.waiting_for.model_dump(mode="json"),
+        )
+
+    def _pause_for_agent_presentation(self, agent_id: str, event_id: str) -> None:
+        profile = self._agent_profiles[agent_id]
+        self._pending_presentation_event_id = event_id
+        self._state.waiting_for = PendingInput(
+            type=PendingInputType.PRESENTATION,
+            seat=profile.seat,
+            agent_id=agent_id,
+            client_id=profile.client_id,
+            reason=f"Waiting for {profile.display_name} to finish speaking.",
+        )
+        self._state.automation_status = "waiting_for_external_input"
+        self._state.legal_actions = []
+        self._state.active_to_call = 0
+        self._append_event(
+            EventType.ENGINE_PAUSED,
+            source="orchestrator",
+            summary=f"Engine paused for {profile.display_name} presentation.",
+            payload={**self._state.waiting_for.model_dump(mode="json"), "presentation_event_id": event_id},
         )
 
     def _request_next_reveal(self) -> None:

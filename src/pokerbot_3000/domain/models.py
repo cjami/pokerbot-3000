@@ -101,6 +101,7 @@ class PendingInputType(StrEnum):
     HUMAN_ACTION = "human_action"
     PRIVATE_CARDS = "private_cards"
     AGENT_ACTION = "agent_action"
+    PRESENTATION = "presentation"
     REVEALED_CARDS = "revealed_cards"
 
 

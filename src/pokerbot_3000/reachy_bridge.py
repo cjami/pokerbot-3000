@@ -409,8 +409,8 @@ class ReachyBridge:
         )
         if not result.get("accepted"):
             self._post_status(
-                ClientConnectionState.ERROR,
-                "Reachy private-card frame rejected",
+                ClientConnectionState.CONNECTED,
+                "Reachy private-card frame pending",
                 str(result.get("reason")),
             )
             return
@@ -427,8 +427,24 @@ class ReachyBridge:
         payload = event.get("payload")
         if not isinstance(event_id, str) or not isinstance(payload, dict):
             return
-        if event_id in self.seen_event_ids or payload.get("target_client") != REACHY_CLIENT_ID:
+        if payload.get("target_client") != REACHY_CLIENT_ID:
             return
+        if payload.get("intent") == "request_private_cards":
+            self._handle_private_card_request(event_id, payload)
+            return
+        if event_id in self.seen_event_ids:
+            return
+        self._perform_event(event_id, payload)
+
+    def _handle_private_card_request(self, event_id: str, payload: dict[str, Any]) -> None:
+        if event_id in self.submitted_private_capture_keys:
+            return
+        if event_id not in self.seen_event_ids:
+            self._perform_event(event_id, payload)
+            time.sleep(self.config.capture_settle_seconds)
+        self._capture_private_cards_for_event(event_id)
+
+    def _perform_event(self, event_id: str, payload: dict[str, Any]) -> None:
         self.seen_event_ids.add(event_id)
         speech = _optional_string(payload.get("speech"))
         gesture = _optional_string(payload.get("gesture"))
@@ -439,9 +455,9 @@ class ReachyBridge:
             voice_audio,
             gesture,
         )
-        if payload.get("intent") == "request_private_cards":
-            time.sleep(self.config.capture_settle_seconds)
-            self._capture_private_cards_for_event(event_id)
+        if speech:
+            time.sleep(_estimated_speech_seconds(speech))
+            self._post_presentation_complete(event_id)
 
     def _voice_audio(self, event_id: str) -> bytes | None:
         try:
@@ -455,6 +471,9 @@ class ReachyBridge:
             f"/api/clients/{REACHY_CLIENT_ID}/status",
             {"connection": connection.value, "status": status, "detail": detail},
         )
+
+    def _post_presentation_complete(self, event_id: str) -> None:
+        self.http.post_json(f"/api/presentation/{event_id}/complete", {})
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -546,6 +565,11 @@ def _parse_reachy_daemon_address(daemon_url: str) -> tuple[str, int]:
 
 def _optional_string(value: object) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _estimated_speech_seconds(speech: str) -> float:
+    word_count = len(speech.split())
+    return min(5.0, max(0.8, word_count * 0.32))
 
 
 if __name__ == "__main__":
