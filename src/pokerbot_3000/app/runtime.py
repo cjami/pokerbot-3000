@@ -574,7 +574,11 @@ class DashboardRuntime:
         await self.broadcaster.publish_snapshot()
         try:
             while True:
-                await self.browser_voice_input.submit_pcm(await websocket.receive_bytes())
+                pcm = await websocket.receive_bytes()
+                if self.voice_capture_suppression_reason() is not None:
+                    self.browser_voice_input.discard_pending()
+                    continue
+                await self.browser_voice_input.submit_pcm(pcm)
         except WebSocketDisconnect:
             return
         finally:

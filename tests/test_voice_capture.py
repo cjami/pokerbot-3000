@@ -2,7 +2,7 @@ import asyncio
 from collections.abc import AsyncIterator
 
 from pokerbot_3000.ports.voice import AudioChunk
-from pokerbot_3000.voice import EnergyVoiceActivityDetector, VadConfig
+from pokerbot_3000.voice import BrowserAudioInput, EnergyVoiceActivityDetector, VadConfig
 
 
 def test_energy_vad_emits_phrase_after_trailing_silence():
@@ -21,6 +21,21 @@ def test_energy_vad_emits_phrase_after_trailing_silence():
 
     assert len(segments) == 1
     assert len(segments[0].pcm) >= 512 * 2 * 4
+
+
+def test_browser_audio_input_can_discard_pending_chunks():
+    async def scenario() -> BrowserAudioInput:
+        audio_input = BrowserAudioInput()
+        await audio_input.submit_pcm(b"\x00\x01" * 512)
+        await audio_input.submit_pcm(b"\x02\x03" * 512)
+        return audio_input
+
+    audio_input = asyncio.run(scenario())
+
+    assert audio_input.pending_chunk_count == 2
+    assert audio_input.discard_pending() == 2
+    assert audio_input.pending_chunk_count == 0
+    assert audio_input.discard_pending() == 0
 
 
 async def _chunks() -> AsyncIterator[AudioChunk]:

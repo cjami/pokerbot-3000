@@ -729,6 +729,32 @@ def test_voice_websocket_queues_browser_pcm_chunks():
     assert runtime.browser_voice_input.connected is False
 
 
+def test_voice_websocket_drops_browser_pcm_while_voice_capture_is_suppressed():
+    runtime = build_test_runtime(agent_banter_source=FakeAgentBanter())
+    runtime.browser_voice_input = BrowserAudioInput()
+    client = TestClient(create_app(runtime))
+    client.post("/api/game/start")
+    client.post(
+        "/api/inputs/human-table-talk",
+        json={
+            "source": "voice",
+            "target_agent_id": "eliza",
+            "message": "are you nervous",
+            "raw_transcript": "Eliza, are you nervous?",
+            "confidence": 0.95,
+        },
+    )
+
+    with client.websocket_connect("/ws/voice/human") as websocket:
+        websocket.send_bytes(b"\x00\x01" * 512)
+        time.sleep(0.01)
+
+    assert runtime.browser_voice_input.pending_chunk_count == 0
+    assert runtime.browser_voice_input.submitted_chunk_count == 0
+    assert runtime.browser_voice_input.submitted_byte_count == 0
+    assert runtime.browser_voice_input.connected is False
+
+
 def test_orchestrator_voice_endpoint_returns_audio_for_presentation_event():
     runtime = build_test_runtime()
     client = TestClient(create_app(runtime))

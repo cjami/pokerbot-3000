@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
@@ -143,7 +143,8 @@ class VoiceActionCoordinator:
             self._status.state = "waiting_for_turn"
             await self._publish()
             LOGGER.info("Voice input is ready.")
-            segments = self._adapters.vad.speech_segments(self._adapters.audio_input.chunks())
+            chunks = self._gated_audio_chunks(self._adapters.audio_input.chunks())
+            segments = self._adapters.vad.speech_segments(chunks)
             async for segment in segments:
                 self._status.speech_segment_count += 1
                 LOGGER.info(
@@ -274,6 +275,17 @@ class VoiceActionCoordinator:
         if self._capture_gate is None:
             return None
         return self._capture_gate()
+
+    async def _gated_audio_chunks(self, chunks: AsyncIterator[AudioChunk]) -> AsyncIterator[AudioChunk]:
+        async for chunk in chunks:
+            if self._capture_suppression_reason() is None:
+                yield chunk
+            else:
+                yield type(chunk)(
+                    pcm=b"\0" * len(chunk.pcm),
+                    sample_rate=chunk.sample_rate,
+                    sample_width=chunk.sample_width,
+                )
 
     async def _ignore_segment(self, reason: str) -> None:
         self._status.state = "waiting_for_turn"

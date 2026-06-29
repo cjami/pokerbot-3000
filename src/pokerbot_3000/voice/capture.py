@@ -144,6 +144,16 @@ class BrowserAudioInput:
         """Return the number of browser audio bytes received."""
         return self._submitted_byte_count
 
+    def discard_pending(self) -> int:
+        """Drop queued browser audio chunks and return how many were discarded."""
+        discarded = 0
+        while True:
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return discarded
+            discarded += 1
+
     def connect(self) -> None:
         """Record a browser voice stream connection."""
         self._connection_count += 1
