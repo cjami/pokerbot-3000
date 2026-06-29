@@ -68,7 +68,7 @@ class DemoDefaults:
 class InMemoryOrchestrator:
     """Python-owned game engine that runs until external input is required."""
 
-    _turn_order = (1, 3, 2)
+    _turn_order = (1, 2, 3)
 
     def __init__(self, defaults: DemoDefaults | None = None) -> None:
         """Initialize the orchestrator with a three-player demo table."""

@@ -174,23 +174,12 @@ def _open_human_action_after_flop(orchestrator: InMemoryOrchestrator) -> None:
         orchestrator.record_public_observation(
             PublicTableObservation(board_cards=flop, street_hint=Street.FLOP, confidence=0.9)
         )
-    orchestrator.submit_agent_decision(_decision("eliza", "check"))
     orchestrator.submit_agent_decision(_decision("reachy", "check"))
+    orchestrator.submit_agent_decision(_decision("eliza", "check"))
 
 
 def _complete_preflop(orchestrator: InMemoryOrchestrator) -> None:
     orchestrator.submit_human_action(HumanActionInput.model_validate({"action": {"type": "call"}}))
-    orchestrator.record_client_private_cards(
-        "eliza",
-        PrivateCardObservation(
-            agent_id="eliza",
-            seat=3,
-            hole_cards=[_card("9", "clubs"), _card("9", "diamonds")],
-            source="eliza_browser_webcam",
-            confidence=0.89,
-        ),
-    )
-    orchestrator.submit_agent_decision(_decision("eliza", "call"))
     orchestrator.record_client_private_cards(
         "reachy",
         PrivateCardObservation(
@@ -201,7 +190,18 @@ def _complete_preflop(orchestrator: InMemoryOrchestrator) -> None:
             confidence=0.89,
         ),
     )
-    orchestrator.submit_agent_decision(_decision("reachy", "check"))
+    orchestrator.submit_agent_decision(_decision("reachy", "call"))
+    orchestrator.record_client_private_cards(
+        "eliza",
+        PrivateCardObservation(
+            agent_id="eliza",
+            seat=3,
+            hole_cards=[_card("9", "clubs"), _card("9", "diamonds")],
+            source="eliza_browser_webcam",
+            confidence=0.89,
+        ),
+    )
+    orchestrator.submit_agent_decision(_decision("eliza", "check"))
 
 
 def _decision(agent_id: str, action_type: str, amount: int | None = None) -> AgentDecision:

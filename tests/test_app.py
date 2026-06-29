@@ -348,8 +348,8 @@ def test_runtime_prewarms_orchestrator_voice_for_new_speech_events():
 
         speech_event = next(event for event in result.events if event.event_type == "presentation_command")
         expected = (
-            "Move the dealer button to Che. Eliza posts small blind 10. "
-            "Reachy posts big blind 20. Deal two cards. Action is on Che."
+            "Move the dealer button to Che. Reachy posts small blind 10. "
+            "Eliza posts big blind 20. Deal two cards. Action is on Che."
         )
         assert voice.calls == [expected]
         assert await runtime.synthesize_orchestrator_event(speech_event.event_id) == f"audio:{expected}".encode()
@@ -457,15 +457,15 @@ def test_api_thin_client_private_cards_trigger_internal_agent_turn():
     client.post("/api/inputs/human-action", json={"action": {"type": "call"}})
 
     response = client.post(
-        "/api/clients/eliza/private-cards",
+        "/api/clients/reachy/private-cards",
         json={
-            "agent_id": "eliza",
-            "seat": 3,
+            "agent_id": "reachy",
+            "seat": 2,
             "hole_cards": [
-                {"rank": "9", "suit": "clubs"},
-                {"rank": "9", "suit": "diamonds"},
+                {"rank": "king", "suit": "clubs"},
+                {"rank": "king", "suit": "diamonds"},
             ],
-            "source": "eliza_browser_webcam",
+            "source": "reachy_camera",
             "confidence": 0.89,
         },
     )
@@ -474,7 +474,7 @@ def test_api_thin_client_private_cards_trigger_internal_agent_turn():
     payload = response.json()
     assert payload["accepted"] is True
     assert payload["state"]["pot"] == 60
-    assert payload["state"]["waiting_for"]["agent_id"] == "reachy"
+    assert payload["state"]["waiting_for"]["agent_id"] == "eliza"
     assert "agent_decision" in {event["event_type"] for event in payload["events"]}
 
 
@@ -485,14 +485,14 @@ def test_api_thin_client_private_card_frame_triggers_internal_agent_turn():
     client.post("/api/inputs/human-action", json={"action": {"type": "call"}})
 
     response = client.post(
-        "/api/clients/eliza/private-cards/frame",
-        json={"source": "eliza_browser_webcam", "data_uri": "data:image/png;base64,dGVzdGZyYW1l"},
+        "/api/clients/reachy/private-cards/frame",
+        json={"source": "reachy_camera", "data_uri": "data:image/png;base64,dGVzdGZyYW1l"},
     )
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["accepted"] is True
-    assert payload["state"]["waiting_for"]["agent_id"] == "reachy"
+    assert payload["state"]["waiting_for"]["agent_id"] == "eliza"
     assert "agent_decision" in {event["event_type"] for event in payload["events"]}
 
 
@@ -602,22 +602,22 @@ def test_public_board_frame_submission_advances_recognition_from_browser_image()
     client.post("/api/game/start")
     client.post("/api/inputs/human-action", json={"action": {"type": "call"}})
     client.post(
-        "/api/clients/eliza/private-cards",
-        json={
-            "agent_id": "eliza",
-            "seat": 3,
-            "hole_cards": [{"rank": "9", "suit": "clubs"}, {"rank": "9", "suit": "diamonds"}],
-            "source": "eliza_browser_webcam",
-            "confidence": 0.89,
-        },
-    )
-    client.post(
         "/api/clients/reachy/private-cards",
         json={
             "agent_id": "reachy",
             "seat": 2,
             "hole_cards": [{"rank": "king", "suit": "clubs"}, {"rank": "king", "suit": "diamonds"}],
             "source": "reachy_camera",
+            "confidence": 0.89,
+        },
+    )
+    client.post(
+        "/api/clients/eliza/private-cards",
+        json={
+            "agent_id": "eliza",
+            "seat": 3,
+            "hole_cards": [{"rank": "9", "suit": "clubs"}, {"rank": "9", "suit": "diamonds"}],
+            "source": "eliza_browser_webcam",
             "confidence": 0.89,
         },
     )
@@ -661,17 +661,17 @@ def test_revealed_cards_frame_submission_advances_current_showdown_reveal():
 
     response = client.post(
         "/api/vision/showdown/revealed-cards",
-        json={"seat": 3, "source": "seat_3_crop", "data_uri": "data:image/png;base64,dGVzdGZyYW1l"},
+        json={"seat": 2, "source": "seat_2_crop", "data_uri": "data:image/png;base64,dGVzdGZyYW1l"},
     )
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["accepted"] is True
-    assert payload["state"]["showdown"]["revealed_cards_by_seat"]["3"] == [
+    assert payload["state"]["showdown"]["revealed_cards_by_seat"]["2"] == [
         {"rank": "9", "suit": "clubs"},
         {"rank": "9", "suit": "diamonds"},
     ]
-    assert payload["state"]["waiting_for"]["seat"] == 2
+    assert payload["state"]["waiting_for"]["seat"] == 3
 
 
 def _complete_board(orchestrator: InMemoryOrchestrator) -> None:
@@ -692,17 +692,6 @@ def _open_human_action_after_flop(orchestrator: InMemoryOrchestrator) -> None:
     flop = [_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs")]
     orchestrator.submit_human_action(HumanActionInput.model_validate({"action": {"type": "call"}}))
     orchestrator.record_client_private_cards(
-        "eliza",
-        PrivateCardObservation(
-            agent_id="eliza",
-            seat=3,
-            hole_cards=[_card("9", "clubs"), _card("9", "diamonds")],
-            source="eliza_browser_webcam",
-            confidence=0.89,
-        ),
-    )
-    orchestrator.submit_agent_decision(_decision("eliza", "call"))
-    orchestrator.record_client_private_cards(
         "reachy",
         PrivateCardObservation(
             agent_id="reachy",
@@ -712,13 +701,24 @@ def _open_human_action_after_flop(orchestrator: InMemoryOrchestrator) -> None:
             confidence=0.89,
         ),
     )
-    orchestrator.submit_agent_decision(_decision("reachy", "check"))
+    orchestrator.submit_agent_decision(_decision("reachy", "call"))
+    orchestrator.record_client_private_cards(
+        "eliza",
+        PrivateCardObservation(
+            agent_id="eliza",
+            seat=3,
+            hole_cards=[_card("9", "clubs"), _card("9", "diamonds")],
+            source="eliza_browser_webcam",
+            confidence=0.89,
+        ),
+    )
+    orchestrator.submit_agent_decision(_decision("eliza", "check"))
     for _ in range(2):
         orchestrator.record_public_observation(
             PublicTableObservation(board_cards=flop, street_hint=Street.FLOP, confidence=0.9)
         )
-    orchestrator.submit_agent_decision(_decision("eliza", "check"))
     orchestrator.submit_agent_decision(_decision("reachy", "check"))
+    orchestrator.submit_agent_decision(_decision("eliza", "check"))
 
 
 def _commit_turn(orchestrator: InMemoryOrchestrator) -> None:
@@ -727,8 +727,8 @@ def _commit_turn(orchestrator: InMemoryOrchestrator) -> None:
         orchestrator.record_public_observation(
             PublicTableObservation(board_cards=turn, street_hint=Street.TURN, confidence=0.9)
         )
-    orchestrator.submit_agent_decision(_decision("eliza", "check"))
     orchestrator.submit_agent_decision(_decision("reachy", "check"))
+    orchestrator.submit_agent_decision(_decision("eliza", "check"))
 
 
 def _commit_river(orchestrator: InMemoryOrchestrator) -> None:
@@ -743,8 +743,8 @@ def _commit_river(orchestrator: InMemoryOrchestrator) -> None:
         orchestrator.record_public_observation(
             PublicTableObservation(board_cards=river, street_hint=Street.RIVER, confidence=0.9)
         )
-    orchestrator.submit_agent_decision(_decision("eliza", "check"))
     orchestrator.submit_agent_decision(_decision("reachy", "check"))
+    orchestrator.submit_agent_decision(_decision("eliza", "check"))
 
 
 def _decision(agent_id: str, action_type: str, amount: int | None = None) -> AgentDecision:
