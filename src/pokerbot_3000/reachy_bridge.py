@@ -33,6 +33,7 @@ DEFAULT_REACHY_TIMEOUT_SECONDS = 15.0
 DEFAULT_CAPTURE_SETTLE_SECONDS = 0.8
 
 ReachyConnectionMode = Literal["auto", "localhost_only", "network"]
+JsonResponse = dict[str, Any] | list[dict[str, Any]]
 
 
 class BridgeError(RuntimeError):
@@ -42,13 +43,13 @@ class BridgeError(RuntimeError):
 class BridgeHttpClient(Protocol):
     """Minimal HTTP client used by the bridge."""
 
-    def get_json(self, path: str) -> dict[str, Any] | list[dict[str, Any]]:
+    def get_json(self, path: str) -> JsonResponse:
         """Return a JSON response from a GET request."""
 
     def get_bytes(self, path: str) -> bytes:
         """Return a binary response from a GET request."""
 
-    def post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def post_json(self, path: str, payload: dict[str, Any]) -> JsonResponse:
         """Return a JSON response from a POST request."""
 
 
@@ -89,13 +90,13 @@ class UrllibBridgeHttpClient:
         """Create a client rooted at the FastAPI app URL."""
         self._base_url = base_url if base_url.endswith("/") else f"{base_url}/"
 
-    def get_json(self, path: str) -> dict[str, Any] | list[dict[str, Any]]:
+    def get_json(self, path: str) -> JsonResponse:
         """Return JSON from a GET request."""
         response = self._request_json("GET", path)
         if not isinstance(response, dict | list):
             msg = "Expected JSON object or array response."
             raise BridgeError(msg)
-        return cast("dict[str, Any] | list[dict[str, Any]]", response)
+        return cast("JsonResponse", response)
 
     def get_bytes(self, path: str) -> bytes:
         """Return bytes from a GET request."""
@@ -115,13 +116,13 @@ class UrllibBridgeHttpClient:
             msg = f"Could not reach Pokerbot API: {exc}"
             raise BridgeError(msg) from exc
 
-    def post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def post_json(self, path: str, payload: dict[str, Any]) -> JsonResponse:
         """Return JSON from a POST request."""
         response = self._request_json("POST", path, payload)
-        if not isinstance(response, dict):
-            msg = "Expected JSON object response."
+        if not isinstance(response, dict | list):
+            msg = "Expected JSON object or array response."
             raise BridgeError(msg)
-        return cast("dict[str, Any]", response)
+        return cast("JsonResponse", response)
 
     def _request_json(self, method: str, path: str, payload: dict[str, Any] | None = None) -> object:
         data = None if payload is None else json.dumps(payload).encode("utf-8")
@@ -407,6 +408,9 @@ class ReachyBridge:
             f"/api/clients/{REACHY_CLIENT_ID}/private-cards/frame",
             {"source": self.config.source, "data_uri": data_uri},
         )
+        if not isinstance(result, dict):
+            msg = "Expected private-card frame response to be a JSON object."
+            raise BridgeError(msg)
         if not result.get("accepted"):
             self._post_status(
                 ClientConnectionState.CONNECTED,

@@ -301,6 +301,7 @@ def test_api_state_returns_public_game_snapshot():
     assert payload["hand_id"] == "hand_001"
     assert payload["automation_status"] == "stopped"
     assert payload["waiting_for"] is None
+    assert payload["showdown"]["payouts_by_seat"] == {}
     assert payload["players"]["1"]["name"] == "Che"
     assert "reachy" not in payload
 
@@ -430,10 +431,59 @@ def test_api_human_table_talk_responds_without_consuming_action():
     assert presentation["payload"]["target_client"] == "eliza"
     assert presentation["payload"]["speech"] == "I am listening."
     assert presentation["payload"]["emotion"] == "confused"
+    assert presentation["payload"]["blocks_game_flow"] is True
     assert banter.direct_requests[0].target_agent_id == "eliza"
 
 
-def test_runtime_human_action_reaction_blocks_agent_decisions_until_complete():
+def test_runtime_table_talk_blocks_human_action_until_speech_completes():
+    runtime = build_test_runtime(agent_banter_source=FakeAgentBanter())
+    client = TestClient(create_app(runtime))
+    client.post("/api/game/start")
+    _open_human_action_after_flop(runtime.orchestrator)
+
+    table_talk = client.post(
+        "/api/inputs/human-table-talk",
+        json={
+            "source": "voice",
+            "target_agent_id": "eliza",
+            "message": "are you nervous",
+            "raw_transcript": "Eliza, are you nervous?",
+            "confidence": 0.95,
+        },
+    )
+    table_talk_payload = table_talk.json()
+    presentation = next(
+        event for event in table_talk_payload["events"] if event["event_type"] == "presentation_command"
+    )
+    assert presentation["payload"]["blocks_game_flow"] is True
+
+    blocked_response = client.post(
+        "/api/inputs/human-action",
+        json={"source": "voice", "action": {"type": "bet", "amount": 100}},
+    )
+
+    assert blocked_response.status_code == 200
+    blocked_payload = blocked_response.json()
+    assert blocked_payload["accepted"] is False
+    assert blocked_payload["reason"] == "Waiting for agent speech to finish before accepting another action."
+    assert blocked_payload["state"]["waiting_for"]["type"] == "human_action"
+    assert "agent_decision" not in {event["event_type"] for event in blocked_payload["events"]}
+
+    client.post(f"/api/presentation/{presentation['event_id']}/complete")
+    response = client.post(
+        "/api/inputs/human-action",
+        json={"source": "voice", "action": {"type": "bet", "amount": 100}},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["accepted"] is True
+    assert "agent_decision" in {event["event_type"] for event in payload["events"]}
+    assert payload["state"]["waiting_for"]["type"] == "presentation"
+    assert payload["state"]["waiting_for"]["agent_id"] == "reachy"
+
+
+def test_runtime_human_action_reaction_does_not_block_agent_decisions():
     reaction = AgentBanterDecision(
         agent_id="reachy",
         speech="Bold move, Che.",
@@ -462,13 +512,10 @@ def test_runtime_human_action_reaction_blocks_agent_decisions_until_complete():
     assert presentation["payload"]["target_client"] == "reachy"
     assert presentation["payload"]["speech"] == "Bold move, Che."
     assert presentation["payload"]["emotion"] == "confident"
-    assert "agent_decision" not in {event["event_type"] for event in payload["events"]}
-
-    completion = client.post(f"/api/presentation/{presentation['event_id']}/complete")
-
-    assert completion.status_code == 200
-    completion_events = completion.json()
-    assert "agent_decision" in {event["event_type"] for event in completion_events}
+    assert presentation["payload"]["blocks_game_flow"] is False
+    assert "agent_decision" in {event["event_type"] for event in payload["events"]}
+    assert payload["state"]["waiting_for"]["type"] == "presentation"
+    assert payload["state"]["waiting_for"]["agent_id"] == "reachy"
 
 
 def test_api_thin_client_private_cards_trigger_internal_agent_turn():

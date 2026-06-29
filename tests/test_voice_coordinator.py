@@ -97,6 +97,47 @@ def test_voice_coordinator_submits_parsed_action_when_waiting_for_human():
     asyncio.run(scenario())
 
 
+def test_voice_coordinator_can_submit_actions_through_runtime_callback():
+    async def scenario() -> None:
+        orchestrator = InMemoryOrchestrator()
+        orchestrator.start_game()
+        _open_human_action_after_flop(orchestrator)
+        after_events_calls = 0
+
+        async def submit_human_action(request: HumanActionInput) -> ExternalInputResult:
+            result = orchestrator.submit_human_action(request)
+            agent_result = orchestrator.submit_agent_decision(_decision("reachy", "call"))
+            return agent_result.model_copy(update={"events": [*result.events, *agent_result.events]})
+
+        async def after_events(_events: list[Any]) -> None:
+            nonlocal after_events_calls
+            after_events_calls += 1
+
+        coordinator = VoiceActionCoordinator(
+            orchestrator=orchestrator,
+            adapters=VoiceActionAdapters(
+                audio_input=_OneShotAudioInput(),
+                vad=_PassThroughVad(),
+                transcriber=_StaticTranscriber("bet one hundred"),
+                parser=DeterministicVoiceCommandParser(),
+            ),
+            submit_human_action=submit_human_action,
+            after_events=after_events,
+        )
+
+        coordinator.start()
+        await _wait_for(lambda: coordinator.status.latest_action is not None)
+        await coordinator.stop()
+
+        state = orchestrator.public_state()
+        assert state.waiting_for is not None
+        assert state.waiting_for.type == PendingInputType.PRESENTATION
+        assert state.waiting_for.agent_id == "reachy"
+        assert after_events_calls == 0
+
+    asyncio.run(scenario())
+
+
 def test_voice_coordinator_warms_transcriber_before_first_segment():
     async def scenario() -> None:
         orchestrator = InMemoryOrchestrator()

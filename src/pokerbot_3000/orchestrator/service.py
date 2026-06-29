@@ -282,8 +282,8 @@ class InMemoryOrchestrator:
                 request.target_agent_id,
                 speech.strip(),
                 reaction=reaction or {"intent": "table_talk_reply"},
-                intent="table_talk_reply",
                 presentation=(emotion, "nod"),
+                blocks_game_flow=True,
             )
         return ExternalInputResult(
             accepted=True,
@@ -328,8 +328,8 @@ class InMemoryOrchestrator:
             agent_id,
             _agent_action_speech(profile.display_name, decision.action, decision.speech),
             reaction=decision.reaction,
-            intent=_reaction_intent(decision.reaction),
             presentation=(_emotion_for_action(decision.action.type), _gesture_for_action(decision.action.type)),
+            blocks_game_flow=True,
         )
         self._pause_for_agent_presentation(agent_id, presentation.event_id)
         return ExternalInputResult(
@@ -389,8 +389,8 @@ class InMemoryOrchestrator:
             agent_id,
             speech,
             reaction=reaction or {"intent": intent},
-            intent=intent,
             presentation=(emotion, "nod"),
+            blocks_game_flow=False,
         )
 
     def record_public_observation(self, observation: PublicTableObservation) -> ObservationReceipt:
@@ -573,7 +573,7 @@ class InMemoryOrchestrator:
             self._begin_showdown()
             return
         self._queue_orchestrator_speech(_hand_setup_speech(self._state, first_seat), intent="hand_setup")
-        self._route_action_to(first_seat)
+        self._route_action_to(first_seat, announce_handoff=False)
 
     def _reset_transient_hand_state(self, *, clear_private: bool = True) -> None:
         self._last_valid_board_candidate = None
@@ -614,17 +614,17 @@ class InMemoryOrchestrator:
         self._continue_to_next_action()
 
     def _continue_to_next_action(self) -> None:
-        next_seat = self._next_action_seat_after(self._state.active_player_seat)
+        next_seat = self._next_required_action_seat_after(self._state.active_player_seat)
         if next_seat is None:
             self._finish_betting_round()
             return
         self._route_action_to(next_seat)
 
-    def _route_action_to(self, seat: int) -> None:
+    def _route_action_to(self, seat: int, *, announce_handoff: bool = True) -> None:
         self._set_active_player(seat)
         agent_id = self._agent_id_for_seat(seat)
         if agent_id is None:
-            self._pause_for_human_action(seat)
+            self._pause_for_human_action(seat, announce_handoff=announce_handoff)
             return
         if self._private_states[agent_id].hole_cards:
             self._pause_for_agent_action(agent_id)
@@ -641,6 +641,10 @@ class InMemoryOrchestrator:
     def _begin_all_in_runout(self) -> None:
         self._all_in_runout = True
         self._state.showdown = self._state.showdown.model_copy(update={"status": ShowdownStatus.REVEALING})
+        self._queue_orchestrator_speech(
+            f"All remaining action is complete. The pot is {self._state.pot}; we will run out the board.",
+            intent="all_in_runout",
+        )
         self._begin_showdown_reveals()
 
     def _begin_showdown(self) -> None:
@@ -655,6 +659,11 @@ class InMemoryOrchestrator:
             status=ShowdownStatus.REVEALING,
             reveal_order=reveal_order,
             revealed_cards_by_seat=self._showdown_reveals,
+        )
+        self._queue_orchestrator_speech(
+            f"Showdown. The pot is {self._state.pot}. "
+            f"Reveal order is {_format_player_list(self._state, reveal_order)}.",
+            intent="showdown_reveal",
         )
         self._request_next_reveal()
 
@@ -864,6 +873,10 @@ class InMemoryOrchestrator:
                 "confidence": observation.confidence,
             },
         )
+        self._queue_orchestrator_speech(
+            f"{self._state.street.title()} confirmed. The pot is {self._state.pot}.",
+            intent="board_confirmed",
+        )
 
         if self._all_in_runout:
             if len(cards) < BOARD_COMPLETE_CARD_COUNT:
@@ -886,7 +899,7 @@ class InMemoryOrchestrator:
         self._state.active_to_call = 0
         self._state.min_raise_to = self._defaults.big_blind
         self._acted_this_street = set()
-        first_seat = self._first_live_after(self._state.dealer_seat)
+        first_seat = self._next_required_action_seat_after(self._state.dealer_seat)
         if first_seat is None:
             self._award_if_uncontested()
             return
@@ -946,8 +959,8 @@ class InMemoryOrchestrator:
         speech: str,
         *,
         reaction: dict[str, object],
-        intent: str,
         presentation: tuple[str, str] = ("calm", "nod"),
+        blocks_game_flow: bool = False,
     ) -> GameEvent:
         profile = self._agent_profiles[agent_id]
         emotion, gesture = presentation
@@ -957,10 +970,11 @@ class InMemoryOrchestrator:
             summary=f"Queued {profile.display_name} presentation output.",
             payload={
                 "target_client": profile.client_id,
-                "intent": _reaction_intent(reaction) or intent,
+                "intent": _reaction_intent(reaction),
                 "speech": speech,
                 "emotion": emotion,
                 "gesture": gesture,
+                "blocks_game_flow": blocks_game_flow,
                 "priority": "normal",
             },
         )
@@ -981,7 +995,7 @@ class InMemoryOrchestrator:
             },
         )
 
-    def _pause_for_human_action(self, seat: int) -> None:
+    def _pause_for_human_action(self, seat: int, *, announce_handoff: bool = True) -> None:
         self._state.waiting_for = PendingInput(
             type=PendingInputType.HUMAN_ACTION,
             seat=seat,
@@ -996,6 +1010,8 @@ class InMemoryOrchestrator:
             summary=f"Engine paused for human action at S{seat}.",
             payload=self._state.waiting_for.model_dump(mode="json"),
         )
+        if announce_handoff:
+            self._queue_orchestrator_speech(_action_handoff_speech(self._state, seat), intent="action_handoff")
 
     def _pause_for_private_cards(self, agent_id: str) -> None:
         profile = self._agent_profiles[agent_id]
@@ -1180,6 +1196,14 @@ class InMemoryOrchestrator:
             if self._state.players[seat].status != PlayerStatus.ALL_IN and self._state.players[seat].stack > 0
         ]
 
+    def _seats_requiring_action(self) -> list[int]:
+        return [
+            seat
+            for seat in self._actionable_seats()
+            if seat not in self._acted_this_street
+            or self._state.players[seat].committed_this_street != self._state.current_bet_to_call
+        ]
+
     def _first_live_after(self, seat: int) -> int | None:
         return self._first_matching_after(seat, set(self._live_seats()))
 
@@ -1188,6 +1212,9 @@ class InMemoryOrchestrator:
 
     def _next_action_seat_after(self, seat: int) -> int | None:
         return self._first_matching_after(seat, set(self._actionable_seats()))
+
+    def _next_required_action_seat_after(self, seat: int) -> int | None:
+        return self._first_matching_after(seat, set(self._seats_requiring_action()))
 
     def _first_matching_after(self, seat: int, candidates: set[int]) -> int | None:
         if not candidates:
@@ -1209,17 +1236,9 @@ class InMemoryOrchestrator:
         return small_blind, big_blind
 
     def _is_betting_round_complete(self) -> bool:
-        actionable = set(self._actionable_seats())
         if len(self._live_seats()) <= 1:
             return True
-        if not actionable:
-            return True
-        if not actionable.issubset(self._acted_this_street):
-            return False
-        return all(
-            self._state.players[seat].committed_this_street == self._state.current_bet_to_call
-            for seat in actionable
-        )
+        return not self._seats_requiring_action()
 
     def _should_enter_all_in_runout(self) -> bool:
         live_count = len(self._live_seats())
@@ -1251,12 +1270,22 @@ class InMemoryOrchestrator:
             winner_seats=[winner],
             winning_hand="Uncontested pot",
             pot_awarded=awarded,
+            payouts_by_seat={winner: awarded},
         )
         self._append_event(
             EventType.SHOWDOWN_RESOLVED,
             source="orchestrator",
             summary=f"S{winner} won {awarded} chips uncontested.",
-            payload={"winner_seats": [winner], "pot_awarded": awarded, "winning_hand": "Uncontested pot"},
+            payload={
+                "winner_seats": [winner],
+                "pot_awarded": awarded,
+                "payouts_by_seat": {winner: awarded},
+                "winning_hand": "Uncontested pot",
+            },
+        )
+        self._queue_orchestrator_speech(
+            f"{_player_name(self._state, winner)} wins {awarded} chips uncontested.",
+            intent="uncontested_pot",
         )
         self._start_next_hand_if_possible()
         return True
@@ -1300,6 +1329,7 @@ class InMemoryOrchestrator:
         }
         side_pots = self._state.side_pots or [SidePotSnapshot(amount=self._state.pot, eligible_seats=list(scores))]
         winner_seats: set[int] = set()
+        payouts_by_seat: dict[int, int] = {}
         pot_awarded = 0
         best_overall = max(scores.values())
         for pot in side_pots:
@@ -1311,7 +1341,9 @@ class InMemoryOrchestrator:
             winner_seats.update(winners)
             share, remainder = divmod(pot.amount, len(winners))
             for index, seat in enumerate(winners):
-                self._state.players[seat].stack += share + (1 if index < remainder else 0)
+                payout = share + (1 if index < remainder else 0)
+                self._state.players[seat].stack += payout
+                payouts_by_seat[seat] = payouts_by_seat.get(seat, 0) + payout
             pot_awarded += pot.amount
 
         self._state.pot = 0
@@ -1329,6 +1361,7 @@ class InMemoryOrchestrator:
                 "winner_seats": sorted(winner_seats),
                 "winning_hand": winning_hand,
                 "pot_awarded": pot_awarded,
+                "payouts_by_seat": payouts_by_seat,
                 "last_error": None,
                 "revealed_cards_by_seat": self._showdown_reveals,
             },
@@ -1342,7 +1375,12 @@ class InMemoryOrchestrator:
                 "winner_seats": sorted(winner_seats),
                 "winning_hand": winning_hand,
                 "pot_awarded": pot_awarded,
+                "payouts_by_seat": payouts_by_seat,
             },
+        )
+        self._queue_orchestrator_speech(
+            f"{_format_payouts(self._state, payouts_by_seat)} with {winning_hand}.",
+            intent="showdown_resolved",
         )
         self._start_next_hand_if_possible()
 
@@ -1541,6 +1579,32 @@ def _hand_setup_speech(state: PublicGameState, first_seat: int) -> str:
 
 def _player_name(state: PublicGameState, seat: int) -> str:
     return state.players[seat].name
+
+
+def _format_player_list(state: PublicGameState, seats: list[int]) -> str:
+    names = [_player_name(state, seat) for seat in seats]
+    if not names:
+        return "no one"
+    if len(names) == 1:
+        return names[0]
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+def _action_handoff_speech(state: PublicGameState, seat: int) -> str:
+    player = _player_name(state, seat)
+    to_call = state.active_to_call
+    if to_call:
+        return f"Action is on {player}. {to_call} to call."
+    return f"Action is on {player}."
+
+
+def _format_payouts(state: PublicGameState, payouts_by_seat: dict[int, int]) -> str:
+    payouts = [f"{_player_name(state, seat)} wins {amount} chips" for seat, amount in sorted(payouts_by_seat.items())]
+    if not payouts:
+        return "No chips are awarded"
+    if len(payouts) == 1:
+        return payouts[0]
+    return f"{', '.join(payouts[:-1])}, and {payouts[-1]}"
 
 
 def _side_pots_for(contributions: dict[int, int], eligible_seats: set[int]) -> list[SidePotSnapshot]:

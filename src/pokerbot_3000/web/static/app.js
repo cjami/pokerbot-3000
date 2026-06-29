@@ -270,6 +270,15 @@ function renderShowdown(showdown) {
     "[data-showdown-winner]",
     showdown.winner_seats?.length ? showdown.winner_seats.map((seat) => `S${seat}`).join(", ") : "none",
   );
+  text("[data-showdown-payouts]", formatPayouts(showdown.payouts_by_seat));
+}
+
+function formatPayouts(payoutsBySeat) {
+  const entries = Object.entries(payoutsBySeat ?? {});
+  if (entries.length === 0) {
+    return "none";
+  }
+  return entries.map(([seat, amount]) => `S${seat}: ${amount}`).join(", ");
 }
 
 function renderPrivateStates(privateStates) {

@@ -290,6 +290,45 @@ def test_orchestrator_postflop_bet_runs_until_turn_recognition_after_agent_calls
     assert result.state.board_recognition.expected_card_count == 4
 
 
+def test_orchestrator_routes_back_to_human_after_eliza_folds_to_reachy_preflop_raise():
+    orchestrator = InMemoryOrchestrator()
+    orchestrator.start_game()
+    orchestrator.submit_human_action(HumanActionInput.model_validate({"action": {"type": "call"}}))
+    _record_private(orchestrator, "reachy")
+    _submit_agent_decision_and_complete(orchestrator, _decision("reachy", "raise_to", 100))
+    _record_private(orchestrator, "eliza")
+
+    result = _submit_agent_decision_and_complete(orchestrator, _decision("eliza", "fold"))
+
+    assert result.accepted is True
+    assert result.state.waiting_for is not None
+    assert result.state.waiting_for.type == PendingInputType.HUMAN_ACTION
+    assert result.state.active_player_seat == 1
+    assert result.state.active_to_call == 80
+    handoff = next(event for event in result.events if event.payload.get("intent") == "action_handoff")
+    assert "Action is on Che" in handoff.payload["speech"]
+    assert "80 to call" in handoff.payload["speech"]
+
+
+def test_orchestrator_routes_back_to_human_after_eliza_folds_to_reachy_postflop_bet():
+    orchestrator = InMemoryOrchestrator()
+    _complete_preflop(orchestrator)
+    _record_public_observation(orchestrator, _flop())
+    _record_public_observation(orchestrator, _flop())
+    _submit_agent_decision_and_complete(orchestrator, _decision("reachy", "bet", 100))
+
+    result = _submit_agent_decision_and_complete(orchestrator, _decision("eliza", "fold"))
+
+    assert result.accepted is True
+    assert result.state.waiting_for is not None
+    assert result.state.waiting_for.type == PendingInputType.HUMAN_ACTION
+    assert result.state.active_player_seat == 1
+    assert result.state.active_to_call == 100
+    handoff = next(event for event in result.events if event.payload.get("intent") == "action_handoff")
+    assert "Action is on Che" in handoff.payload["speech"]
+    assert "100 to call" in handoff.payload["speech"]
+
+
 def test_orchestrator_reveals_checked_river_showdown_in_table_order():
     orchestrator = InMemoryOrchestrator()
     _open_human_action_after_flop(orchestrator)
@@ -314,8 +353,14 @@ def test_orchestrator_reveals_checked_river_showdown_in_table_order():
     )
 
     assert result.accepted is True
+    event_types = [event.event_type for event in result.events]
     resolved_event = next(event for event in result.events if event.event_type == "showdown_resolved")
     assert resolved_event.payload["winner_seats"] == [2]
+    assert resolved_event.payload["payouts_by_seat"] == {2: 60}
+    speech_index = next(
+        index for index, event in enumerate(result.events) if event.payload.get("intent") == "showdown_resolved"
+    )
+    assert event_types.index(EventType.SHOWDOWN_RESOLVED) < speech_index < event_types.index(EventType.HAND_STARTED)
     assert result.state.hand_number == 2
     assert result.state.street == Street.PREFLOP
     assert result.state.waiting_for is not None
@@ -332,6 +377,12 @@ def test_orchestrator_auto_starts_next_hand_after_uncontested_pot():
     assert result.accepted is True
     event_types = [event.event_type for event in result.events]
     assert event_types.index(EventType.SHOWDOWN_RESOLVED) < event_types.index(EventType.HAND_STARTED)
+    resolved_event = next(event for event in result.events if event.event_type == EventType.SHOWDOWN_RESOLVED)
+    assert resolved_event.payload["payouts_by_seat"] == {1: 160}
+    speech_index = next(
+        index for index, event in enumerate(result.events) if event.payload.get("intent") == "uncontested_pot"
+    )
+    assert event_types.index(EventType.SHOWDOWN_RESOLVED) < speech_index < event_types.index(EventType.HAND_STARTED)
     assert result.state.hand_number == 2
     assert result.state.dealer_seat == 2
     assert result.state.small_blind_seat == 3

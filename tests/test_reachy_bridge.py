@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Self, cast
 
 import pytest
 
@@ -14,6 +14,7 @@ from pokerbot_3000.reachy_bridge import (
     ReachyDaemonHttpAdapter,
     ReachyMiniAdapter,
     ReachySdkConfig,
+    UrllibBridgeHttpClient,
     _build_reachy_adapter,
 )
 
@@ -267,6 +268,32 @@ def test_reachy_bridge_performs_targeted_presentation_once():
 
     assert reachy.presentations == [("confident", "Reachy calls.", None)]
     assert reachy.voice_audio == [b"mp3-bytes"]
+
+
+def test_urllib_bridge_post_json_accepts_array_response(monkeypatch):
+    class FakeResponse:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'[{"event_id":"evt_next","event_type":"agent_decision","payload":{}}]'
+
+    def fake_urlopen(request: object, timeout: float) -> FakeResponse:
+        assert timeout == 20.0
+        assert cast("Any", request).full_url == "http://127.0.0.1:8000/api/presentation/evt_1/complete"
+        return FakeResponse()
+
+    monkeypatch.setattr("pokerbot_3000.reachy_bridge.urlopen", fake_urlopen)
+
+    response = UrllibBridgeHttpClient("http://127.0.0.1:8000/").post_json(
+        "/api/presentation/evt_1/complete",
+        {},
+    )
+
+    assert response == [{"event_id": "evt_next", "event_type": "agent_decision", "payload": {}}]
 
 
 def test_reachy_daemon_http_adapter_posts_symbolic_movement(monkeypatch):

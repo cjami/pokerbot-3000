@@ -34,6 +34,7 @@ LOGGER = logging.getLogger(__name__)
 
 type EventHook = Callable[[list[GameEvent]], Awaitable[None]]
 type SnapshotPublisher = Callable[[], Awaitable[None]]
+type HumanActionSubmitter = Callable[[HumanActionInput], Awaitable[ExternalInputResult]]
 type TableTalkSubmitter = Callable[[HumanTableTalkInput], Awaitable[ExternalInputResult]]
 
 
@@ -92,6 +93,7 @@ class VoiceActionCoordinator:
         *,
         orchestrator: InMemoryOrchestrator,
         adapters: VoiceActionAdapters,
+        submit_human_action: HumanActionSubmitter | None = None,
         submit_table_talk: TableTalkSubmitter | None = None,
         after_events: EventHook | None = None,
         publish_snapshot: SnapshotPublisher | None = None,
@@ -100,6 +102,7 @@ class VoiceActionCoordinator:
         """Create a coordinator from explicit adapters."""
         self._orchestrator = orchestrator
         self._adapters = adapters
+        self._submit_human_action = submit_human_action
         self._submit_table_talk = submit_table_talk
         self._after_events = after_events
         self._publish_snapshot = publish_snapshot
@@ -205,18 +208,14 @@ class VoiceActionCoordinator:
         LOGGER.info("Submitting voice action: %s.", self._status.latest_action)
         await self._publish()
 
-        event_start = self._orchestrator.event_count()
         try:
-            result = self._orchestrator.submit_human_action(request)
+            result = await self._submit_human_action_request(request)
         except Exception as exc:  # noqa: BLE001
             self._status.state = "error"
             self._status.last_error = str(exc) or exc.__class__.__name__
             await self._publish()
             return
 
-        events = self._orchestrator.events_since(event_start)
-        if self._after_events is not None:
-            await self._after_events(events)
         if not result.accepted:
             self._status.state = "listening"
             self._status.last_rejection = result.reason
@@ -225,6 +224,17 @@ class VoiceActionCoordinator:
             self._status.state = "waiting_for_turn"
             LOGGER.info("Voice action was accepted.")
         await self._publish()
+
+    async def _submit_human_action_request(self, request: HumanActionInput) -> ExternalInputResult:
+        if self._submit_human_action is not None:
+            return await self._submit_human_action(request)
+
+        event_start = self._orchestrator.event_count()
+        result = self._orchestrator.submit_human_action(request)
+        events = self._orchestrator.events_since(event_start)
+        if self._after_events is not None:
+            await self._after_events(events)
+        return result
 
     async def _submit_table_talk_request(self, request: HumanTableTalkInput) -> None:
         self._status.state = "submitting"

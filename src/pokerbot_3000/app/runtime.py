@@ -444,6 +444,9 @@ class DashboardRuntime:
         async def submit_table_talk(request: HumanTableTalkInput) -> ExternalInputResult:
             return await runtime_ref["runtime"].build_human_table_talk_result(request)
 
+        async def submit_human_action(request: HumanActionInput) -> ExternalInputResult:
+            return await runtime_ref["runtime"].submit_human_action(request)
+
         voice_coordinator = VoiceActionCoordinator(
             orchestrator=orchestrator,
             adapters=VoiceActionAdapters(
@@ -452,6 +455,7 @@ class DashboardRuntime:
                 transcriber=ElevenLabsSpeechTranscriber(),
                 parser=DeterministicVoiceCommandParser(),
             ),
+            submit_human_action=submit_human_action,
             submit_table_talk=submit_table_talk,
             after_events=handle_events,
             publish_snapshot=broadcaster.publish_snapshot,
@@ -582,6 +586,13 @@ class DashboardRuntime:
 
     async def submit_human_action(self, request: HumanActionInput) -> ExternalInputResult:
         """Consume a human action and drain any resulting agent turns."""
+        if self._has_uncompleted_agent_speech():
+            return ExternalInputResult(
+                accepted=False,
+                reason="Waiting for agent speech to finish before accepting another action.",
+                events=[],
+                state=self.orchestrator.public_state(),
+            )
         result = self.orchestrator.submit_human_action(request)
         reaction_events: list[GameEvent] = []
         if result.accepted:
@@ -708,10 +719,12 @@ class DashboardRuntime:
             if _is_orchestrator_speech_event(event):
                 self._queue_orchestrator_synthesis(event.event_id)
             elif _is_eliza_speech_event(event):
-                self._blocking_agent_speech_event_ids.add(event.event_id)
+                if _is_blocking_agent_speech_event(event):
+                    self._blocking_agent_speech_event_ids.add(event.event_id)
                 self._queue_eliza_synthesis(event.event_id)
             elif _is_reachy_speech_event(event):
-                self._blocking_agent_speech_event_ids.add(event.event_id)
+                if _is_blocking_agent_speech_event(event):
+                    self._blocking_agent_speech_event_ids.add(event.event_id)
                 self._queue_reachy_synthesis(event.event_id)
 
     def _has_uncompleted_agent_speech(self) -> bool:
@@ -898,7 +911,15 @@ def _is_agent_speech_event(event: GameEvent, client_id: ClientId) -> bool:
 
 
 def _events_include_agent_speech(events: list[GameEvent]) -> bool:
-    return any(_is_eliza_speech_event(event) or _is_reachy_speech_event(event) for event in events)
+    return any(
+        (_is_eliza_speech_event(event) or _is_reachy_speech_event(event))
+        and _is_blocking_agent_speech_event(event)
+        for event in events
+    )
+
+
+def _is_blocking_agent_speech_event(event: GameEvent) -> bool:
+    return event.payload.get("blocks_game_flow") is True
 
 
 def _audio_cache_key(voice: str, event_id: str) -> str:

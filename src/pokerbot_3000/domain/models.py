@@ -228,6 +228,7 @@ class ShowdownSnapshot(PokerBaseModel):
     winner_seats: list[int] = Field(default_factory=list)
     winning_hand: str | None = None
     pot_awarded: int = Field(default=0, ge=0)
+    payouts_by_seat: dict[int, int] = Field(default_factory=dict)
     last_error: str | None = None
 
 
