@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+import eval7
+
 from pokerbot_3000.domain.models import (
     ActionType,
     BoardRecognitionSnapshot,
@@ -29,12 +31,18 @@ from pokerbot_3000.domain.models import (
     PrivateCardObservation,
     PublicGameState,
     PublicTableObservation,
+    ShowdownSnapshot,
+    ShowdownStatus,
     Street,
 )
 from pokerbot_3000.orchestrator.agents import AgentProfile, StubPokerAgent
 
 if TYPE_CHECKING:
     from pokerbot_3000.domain.cards import Card
+
+BOARD_COMPLETE_CARD_COUNT = 5
+HOLE_CARD_COUNT = 2
+MIN_NON_ALL_IN_PLAYERS_FOR_BETTING = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +74,10 @@ class InMemoryOrchestrator:
         self._agent_profiles = self._build_agent_profiles()
         self._events: list[GameEvent] = []
         self._last_valid_board_candidate: tuple[tuple[str, str], ...] | None = None
+        self._acted_this_street: set[int] = set()
+        self._last_aggressor_by_street: dict[Street, int] = {}
+        self._showdown_reveals: dict[int, list[Card]] = {}
+        self._all_in_runout = False
         self._append_event(
             EventType.SYSTEM,
             source="orchestrator",
@@ -122,6 +134,10 @@ class InMemoryOrchestrator:
         self._state = self._build_initial_state(self._defaults)
         self._private_states = self._build_private_states()
         self._last_valid_board_candidate = None
+        self._acted_this_street = set()
+        self._last_aggressor_by_street = {}
+        self._showdown_reveals = {}
+        self._all_in_runout = False
         self._append_event(
             EventType.GAME_STARTED,
             source="dashboard",
@@ -155,7 +171,11 @@ class InMemoryOrchestrator:
             confidence_threshold=self._defaults.board_confidence_threshold,
             required_stable_samples=self._defaults.required_stable_board_samples,
         )
+        self._state.showdown = ShowdownSnapshot()
         self._last_valid_board_candidate = None
+        self._acted_this_street = set()
+        self._showdown_reveals = {}
+        self._all_in_runout = False
         self._append_event(
             EventType.GAME_STOPPED,
             source="dashboard",
@@ -188,7 +208,7 @@ class InMemoryOrchestrator:
             )
 
         self._commit_action(request.seat, request.action, source=request.source)
-        self._advance_until_blocked()
+        self._advance_after_action()
         return ExternalInputResult(
             accepted=True,
             reason="Human action consumed; engine advanced until the next external input.",
@@ -262,10 +282,72 @@ class InMemoryOrchestrator:
         event_start = len(self._events)
         self._store_private_cards(agent_id, observation)
         self._run_agent_turn(agent_id)
-        self._advance_until_blocked()
+        self._advance_after_action()
         return ExternalInputResult(
             accepted=True,
             reason=f"{agent_id} private cards consumed; internal agent acted.",
+            events=self.events_since(event_start),
+            state=self.public_state(),
+        )
+
+    def record_revealed_cards(self, seat: int, cards: list[Card], *, source: str) -> ExternalInputResult:
+        """Consume one showdown reveal crop and continue runout or resolution."""
+        if self._state.automation_status == "stopped":
+            return ExternalInputResult(
+                accepted=False,
+                reason="Game is stopped. Start the game before submitting revealed cards.",
+                events=[],
+                state=self.public_state(),
+            )
+        if not self._is_waiting_for(PendingInputType.REVEALED_CARDS, seat=seat):
+            return ExternalInputResult(
+                accepted=False,
+                reason=f"The engine is not waiting for revealed cards from seat {seat}.",
+                events=[],
+                state=self.public_state(),
+            )
+
+        event_start = len(self._events)
+        error = self._revealed_cards_validation_error(seat, cards)
+        if error is not None:
+            self._state.showdown = self._state.showdown.model_copy(
+                update={"status": ShowdownStatus.ERROR, "last_error": error},
+            )
+            self._append_event(
+                EventType.REVEALED_CARD_OBSERVATION,
+                source=source,
+                summary=f"Rejected revealed cards for S{seat}: {error}",
+                payload={"seat": seat, "error": error},
+            )
+            return ExternalInputResult(
+                accepted=False,
+                reason=error,
+                events=self.events_since(event_start),
+                state=self.public_state(),
+            )
+
+        self._showdown_reveals[seat] = cards
+        self._state.showdown = self._state.showdown.model_copy(
+            update={
+                "status": ShowdownStatus.REVEALING,
+                "revealed_cards_by_seat": self._showdown_reveals,
+                "last_error": None,
+            },
+        )
+        self._append_event(
+            EventType.REVEALED_CARD_OBSERVATION,
+            source=source,
+            summary=f"Read revealed cards for S{seat}.",
+            payload={
+                "seat": seat,
+                "hole_card_count": len(cards),
+                "source": source,
+            },
+        )
+        self._continue_after_reveal()
+        return ExternalInputResult(
+            accepted=True,
+            reason=f"Revealed cards for seat {seat} consumed.",
             events=self.events_since(event_start),
             state=self.public_state(),
         )
@@ -274,15 +356,68 @@ class InMemoryOrchestrator:
         """Return events appended after a known index."""
         return [event.model_copy(deep=True) for event in self._events[index:]]
 
-    def _advance_until_blocked(self) -> None:
-        next_seat = self._next_seat_after(self._state.active_player_seat)
+    def _advance_after_action(self) -> None:
+        if self._award_if_uncontested():
+            return
+        if self._should_enter_all_in_runout():
+            self._begin_all_in_runout()
+            return
+        if self._is_betting_round_complete():
+            self._finish_betting_round()
+            return
+        self._continue_to_next_action()
+
+    def _continue_to_next_action(self) -> None:
+        next_seat = self._next_action_seat_after(self._state.active_player_seat)
+        if next_seat is None:
+            self._finish_betting_round()
+            return
         self._set_active_player(next_seat)
         agent_id = self._agent_id_for_seat(next_seat)
         if agent_id is None:
             self._pause_for_human_action(next_seat)
             return
-
+        if self._private_states[agent_id].hole_cards:
+            self._run_agent_turn(agent_id)
+            self._advance_after_action()
+            return
         self._pause_for_private_cards(agent_id)
+
+    def _finish_betting_round(self) -> None:
+        if len(self._state.board) < BOARD_COMPLETE_CARD_COUNT:
+            self._request_public_board_cards(len(self._state.board) + 1)
+            return
+        self._begin_showdown()
+
+    def _begin_all_in_runout(self) -> None:
+        self._all_in_runout = True
+        self._state.showdown = self._state.showdown.model_copy(update={"status": ShowdownStatus.REVEALING})
+        self._begin_showdown_reveals()
+
+    def _begin_showdown(self) -> None:
+        if self._award_if_uncontested():
+            return
+        self._state.street = Street.SHOWDOWN
+        self._begin_showdown_reveals()
+
+    def _begin_showdown_reveals(self) -> None:
+        reveal_order = self._showdown_reveal_order()
+        self._state.showdown = ShowdownSnapshot(
+            status=ShowdownStatus.REVEALING,
+            reveal_order=reveal_order,
+            revealed_cards_by_seat=self._showdown_reveals,
+        )
+        self._request_next_reveal()
+
+    def _continue_after_reveal(self) -> None:
+        if not self._all_required_reveals_read():
+            self._request_next_reveal()
+            return
+        if len(self._state.board) < BOARD_COMPLETE_CARD_COUNT:
+            self._state.showdown = self._state.showdown.model_copy(update={"status": ShowdownStatus.RUNNING_OUT})
+            self._request_public_board_cards(len(self._state.board) + 1)
+            return
+        self._resolve_showdown()
 
     def _run_agent_turn(self, agent_id: str) -> None:
         profile = self._agent_profiles[agent_id]
@@ -325,16 +460,28 @@ class InMemoryOrchestrator:
         player.stack -= amount
         player.committed_this_street += amount
         self._state.pot += amount
+        self._acted_this_street.add(seat)
+        is_aggressive = False
         if action.type in {ActionType.BET, ActionType.RAISE_TO}:
             self._state.current_bet_to_call = action.amount or 0
             self._state.min_raise_to = max(
                 self._state.current_bet_to_call + self._defaults.big_blind,
                 self._defaults.big_blind,
             )
+            is_aggressive = True
         if action.type == ActionType.FOLD:
             player.status = PlayerStatus.FOLDED
         elif action.type == ActionType.ALL_IN:
             player.status = PlayerStatus.ALL_IN
+            if amount > self._state.current_bet_to_call:
+                self._state.current_bet_to_call = amount
+                self._state.min_raise_to = max(amount + self._defaults.big_blind, self._defaults.big_blind)
+                is_aggressive = True
+        elif player.stack == 0:
+            player.status = PlayerStatus.ALL_IN
+        if is_aggressive:
+            self._last_aggressor_by_street[self._state.street] = seat
+            self._acted_this_street = {seat}
 
         amount_text = f" {amount}" if amount else ""
         self._append_event(
@@ -440,8 +587,10 @@ class InMemoryOrchestrator:
             },
         )
 
-        next_expected = {3: 4, 4: 5}.get(len(cards))
-        if next_expected is None:
+        if self._all_in_runout:
+            if len(cards) < BOARD_COMPLETE_CARD_COUNT:
+                self._request_public_board_cards(len(cards) + 1)
+                return
             self._state.board_recognition = self._state.board_recognition.model_copy(
                 update={
                     "status": BoardRecognitionStatus.COMPLETE,
@@ -451,11 +600,52 @@ class InMemoryOrchestrator:
                     "instruction": "Board recognition complete.",
                 },
             )
-            self._queue_orchestrator_speech("The board is complete. Che, action is on you.", intent="board_complete")
-            self._pause_for_human_action(self._defaults.active_player_seat)
+            self._resolve_showdown()
             return
 
-        self._request_public_board_cards(next_expected)
+        if len(cards) == BOARD_COMPLETE_CARD_COUNT:
+            self._state.board_recognition = self._state.board_recognition.model_copy(
+                update={
+                    "status": BoardRecognitionStatus.COMPLETE,
+                    "expected_card_count": None,
+                    "stable_sample_count": 0,
+                    "last_error": None,
+                    "instruction": "Board recognition complete.",
+                },
+            )
+            self._begin_betting_round()
+            return
+
+        self._begin_betting_round()
+
+    def _begin_betting_round(self) -> None:
+        for player in self._state.players.values():
+            player.committed_this_street = 0
+            if player.status == PlayerStatus.ACTIVE:
+                player.status = PlayerStatus.IN_HAND
+        self._state.current_bet_to_call = 0
+        self._state.min_raise_to = self._defaults.big_blind
+        self._acted_this_street = set()
+        first_seat = self._first_live_after(self._state.dealer_seat)
+        if first_seat is None:
+            self._award_if_uncontested()
+            return
+        self._set_active_player(first_seat)
+        self._append_event(
+            EventType.ENGINE_PAUSED,
+            source="orchestrator",
+            summary=f"Betting opened on the {self._state.street}.",
+            payload={"street": self._state.street},
+        )
+        agent_id = self._agent_id_for_seat(first_seat)
+        if agent_id is None:
+            self._pause_for_human_action(first_seat)
+            return
+        if self._private_states[agent_id].hole_cards:
+            self._run_agent_turn(agent_id)
+            self._advance_after_action()
+            return
+        self._pause_for_private_cards(agent_id)
 
     def _request_public_board_cards(self, expected_count: int) -> None:
         stage_name = _stage_name_for_count(expected_count)
@@ -528,6 +718,35 @@ class InMemoryOrchestrator:
             payload=self._state.waiting_for.model_dump(mode="json"),
         )
 
+    def _request_next_reveal(self) -> None:
+        next_seat = next(
+            (seat for seat in self._state.showdown.reveal_order if seat not in self._showdown_reveals),
+            None,
+        )
+        if next_seat is None:
+            self._continue_after_reveal()
+            return
+        self._state.waiting_for = PendingInput(
+            type=PendingInputType.REVEALED_CARDS,
+            seat=next_seat,
+            reason=f"Waiting for S{next_seat} to reveal hole cards.",
+        )
+        self._state.automation_status = "waiting_for_external_input"
+        self._state.legal_actions = []
+        self._state.showdown = self._state.showdown.model_copy(
+            update={
+                "status": ShowdownStatus.REVEALING,
+                "current_reveal_seat": next_seat,
+                "revealed_cards_by_seat": self._showdown_reveals,
+            },
+        )
+        self._append_event(
+            EventType.ENGINE_PAUSED,
+            source="orchestrator",
+            summary=f"Engine paused for S{next_seat} revealed-card input.",
+            payload=self._state.waiting_for.model_dump(mode="json"),
+        )
+
     def _append_event(
         self,
         event_type: EventType,
@@ -574,9 +793,164 @@ class InMemoryOrchestrator:
         self._state.legal_actions = self._legal_actions()
 
     def _legal_actions(self) -> list[ActionType]:
+        player = self._state.players[self._state.active_player_seat]
+        if player.status == PlayerStatus.ALL_IN:
+            return []
         if self._state.current_bet_to_call:
-            return [ActionType.FOLD, ActionType.CALL, ActionType.RAISE_TO]
-        return [ActionType.CHECK, ActionType.BET]
+            return [ActionType.FOLD, ActionType.CALL, ActionType.RAISE_TO, ActionType.ALL_IN]
+        return [ActionType.CHECK, ActionType.BET, ActionType.ALL_IN]
+
+    def _live_seats(self) -> list[int]:
+        return [
+            seat
+            for seat, player in self._state.players.items()
+            if player.status not in {PlayerStatus.FOLDED, PlayerStatus.OUT}
+        ]
+
+    def _actionable_seats(self) -> list[int]:
+        return [
+            seat
+            for seat in self._live_seats()
+            if self._state.players[seat].status != PlayerStatus.ALL_IN and self._state.players[seat].stack > 0
+        ]
+
+    def _first_live_after(self, seat: int) -> int | None:
+        return self._first_matching_after(seat, set(self._live_seats()))
+
+    def _next_action_seat_after(self, seat: int) -> int | None:
+        return self._first_matching_after(seat, set(self._actionable_seats()))
+
+    def _first_matching_after(self, seat: int, candidates: set[int]) -> int | None:
+        if not candidates:
+            return None
+        current = seat
+        for _ in self._turn_order:
+            current = self._next_seat_after(current)
+            if current in candidates:
+                return current
+        return None
+
+    def _is_betting_round_complete(self) -> bool:
+        actionable = set(self._actionable_seats())
+        if len(self._live_seats()) <= 1:
+            return True
+        if not actionable:
+            return True
+        if not actionable.issubset(self._acted_this_street):
+            return False
+        return all(
+            self._state.players[seat].committed_this_street == self._state.current_bet_to_call
+            for seat in actionable
+        )
+
+    def _should_enter_all_in_runout(self) -> bool:
+        live_count = len(self._live_seats())
+        has_all_in_player = any(
+            self._state.players[seat].status == PlayerStatus.ALL_IN for seat in self._live_seats()
+        )
+        return (
+            live_count > 1
+            and has_all_in_player
+            and len(self._actionable_seats()) < MIN_NON_ALL_IN_PLAYERS_FOR_BETTING
+            and self._is_betting_round_complete()
+        )
+
+    def _award_if_uncontested(self) -> bool:
+        live_seats = self._live_seats()
+        if len(live_seats) != 1 or self._state.pot == 0:
+            return False
+        winner = live_seats[0]
+        awarded = self._state.pot
+        self._state.players[winner].stack += awarded
+        self._state.pot = 0
+        self._state.waiting_for = None
+        self._state.legal_actions = []
+        self._state.automation_status = "complete"
+        self._state.showdown = ShowdownSnapshot(
+            status=ShowdownStatus.COMPLETE,
+            winner_seats=[winner],
+            winning_hand="Uncontested pot",
+            pot_awarded=awarded,
+        )
+        self._append_event(
+            EventType.SHOWDOWN_RESOLVED,
+            source="orchestrator",
+            summary=f"S{winner} won {awarded} chips uncontested.",
+            payload={"winner_seats": [winner], "pot_awarded": awarded, "winning_hand": "Uncontested pot"},
+        )
+        return True
+
+    def _showdown_reveal_order(self) -> list[int]:
+        live_seats = self._live_seats()
+        first = self._last_aggressor_by_street.get(Street.RIVER) or self._first_live_after(self._state.dealer_seat)
+        if first is None or first not in live_seats:
+            return live_seats
+        ordered = [first]
+        current = first
+        while len(ordered) < len(live_seats):
+            current = self._next_seat_after(current)
+            if current in live_seats:
+                ordered.append(current)
+        return ordered
+
+    def _all_required_reveals_read(self) -> bool:
+        return all(seat in self._showdown_reveals for seat in self._state.showdown.reveal_order)
+
+    def _revealed_cards_validation_error(self, seat: int, cards: list[Card]) -> str | None:
+        if seat not in self._state.showdown.reveal_order:
+            return f"Seat {seat} is not required to reveal."
+        if len(cards) != HOLE_CARD_COUNT:
+            return f"Expected 2 revealed cards from seat {seat}, detected {len(cards)}."
+        known_cards = [*self._state.board]
+        for revealed_seat, revealed_cards in self._showdown_reveals.items():
+            if revealed_seat != seat:
+                known_cards.extend(revealed_cards)
+        candidate_cards = [*known_cards, *cards]
+        if len(set(_board_key(candidate_cards))) != len(candidate_cards):
+            return "Detected duplicate card in showdown reveal."
+        return None
+
+    def _resolve_showdown(self) -> None:
+        if len(self._state.board) != BOARD_COMPLETE_CARD_COUNT or not self._all_required_reveals_read():
+            return
+        scores = {
+            seat: eval7.evaluate([*_eval7_cards(self._state.board), *_eval7_cards(cards)])
+            for seat, cards in self._showdown_reveals.items()
+        }
+        best_score = max(scores.values())
+        winner_seats = sorted(seat for seat, score in scores.items() if score == best_score)
+        pot = self._state.pot
+        share, remainder = divmod(pot, len(winner_seats))
+        for index, seat in enumerate(winner_seats):
+            self._state.players[seat].stack += share + (1 if index < remainder else 0)
+        self._state.pot = 0
+        self._state.street = Street.SHOWDOWN
+        self._state.waiting_for = None
+        self._state.legal_actions = []
+        self._state.automation_status = "complete"
+        winning_hand = eval7.handtype(best_score)
+        self._state.showdown = self._state.showdown.model_copy(
+            update={
+                "status": ShowdownStatus.COMPLETE,
+                "current_reveal_seat": None,
+                "winner_seats": winner_seats,
+                "winning_hand": winning_hand,
+                "pot_awarded": pot,
+                "last_error": None,
+                "revealed_cards_by_seat": self._showdown_reveals,
+            },
+        )
+        winners = ", ".join(f"S{seat}" for seat in winner_seats)
+        self._append_event(
+            EventType.SHOWDOWN_RESOLVED,
+            source="orchestrator",
+            summary=f"{winners} won {pot} chips with {winning_hand}.",
+            payload={
+                "winner_seats": winner_seats,
+                "winning_hand": winning_hand,
+                "pot_awarded": pot,
+            },
+        )
 
     def _next_seat_after(self, seat: int) -> int:
         index = self._turn_order.index(seat)
@@ -694,6 +1068,18 @@ class InMemoryOrchestrator:
 
 def _board_key(cards: list[Card]) -> tuple[tuple[str, str], ...]:
     return tuple((str(card.rank), str(card.suit)) for card in cards)
+
+
+def _eval7_cards(cards: list[Card]) -> list[eval7.Card]:
+    return [eval7.Card(f"{_rank_code(str(card.rank))}{_suit_code(str(card.suit))}") for card in cards]
+
+
+def _rank_code(rank: str) -> str:
+    return {"ace": "A", "king": "K", "queen": "Q", "jack": "J", "10": "T"}.get(rank, rank)
+
+
+def _suit_code(suit: str) -> str:
+    return {"spades": "s", "hearts": "h", "diamonds": "d", "clubs": "c"}[suit]
 
 
 def _format_board(cards: list[Card]) -> str:

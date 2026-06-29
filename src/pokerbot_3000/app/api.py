@@ -16,6 +16,7 @@ from pokerbot_3000.domain.models import (
     PrivateCardObservation,
     PublicBoardFrameInput,
     PublicGameState,
+    RevealedCardsFrameInput,
 )
 from pokerbot_3000.ports.llm import ImageFrame
 from pokerbot_3000.voice import ElevenLabsClientError, ElevenLabsConfigurationError
@@ -128,6 +129,19 @@ def _create_vision_router(runtime: DashboardRuntime) -> APIRouter:
                 detail="Public board frame must be a JPEG or PNG data URI.",
             )
         return await runtime.process_public_board_frame(
+            ImageFrame(source=frame_input.source, data_uri=frame_input.data_uri),
+        )
+
+    @router.post("/vision/showdown/revealed-cards", response_model=ExternalInputResult)
+    async def submit_revealed_cards_frame(frame_input: RevealedCardsFrameInput) -> ExternalInputResult:
+        """Consume one browser-captured revealed-card seat frame."""
+        if PUBLIC_BOARD_FRAME_DATA_URI.fullmatch(frame_input.data_uri) is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Revealed-card frame must be a JPEG or PNG data URI.",
+            )
+        return await runtime.process_revealed_cards_frame(
+            frame_input.seat,
             ImageFrame(source=frame_input.source, data_uri=frame_input.data_uri),
         )
 

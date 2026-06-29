@@ -5,10 +5,20 @@ const cameraForm = document.querySelector("[data-camera-form]");
 const cameraDevice = document.querySelector("[data-camera-device]");
 const cameraStatus = document.querySelector("[data-camera-status]");
 const cameraPreview = document.querySelector("[data-public-camera-preview]");
+const zoneOverlay = document.querySelector("[data-zone-overlay]");
+const zoneSelect = document.querySelector("[data-zone-select]");
+const zoneClear = document.querySelector("[data-zone-clear]");
 
 const FRAME_INTERVAL_MS = 1500;
 const FRAME_WIDTH = 1600;
 const FRAME_MIME_TYPE = "image/png";
+const CAMERA_ZONE_STORAGE_KEY = "pokerbot_3000.camera_zones.v1";
+const ZONE_LABELS = {
+  board: "Board",
+  seat_1: "S1",
+  seat_2: "S2",
+  seat_3: "S3",
+};
 
 const spokenEventIds = new Set();
 const speechInFlight = new Set();
@@ -21,7 +31,10 @@ let speechQueueActive = false;
 let currentSpeechAudio = null;
 let shouldPlayInitialSnapshotSpeech = false;
 let shouldSubmitBoardFrames = false;
+let pendingRevealSeat = null;
 let hasRenderedInitialSnapshot = false;
+let cameraZones = loadCameraZones();
+let activeZoneDrag = null;
 
 const rankLabels = {
   ace: "Ace",
@@ -45,6 +58,80 @@ const suitLabels = {
   diamonds: "Diamonds",
   clubs: "Clubs",
 };
+
+function loadCameraZones() {
+  try {
+    const parsed = JSON.parse(globalThis.localStorage?.getItem(CAMERA_ZONE_STORAGE_KEY) ?? "{}");
+    return Object.fromEntries(
+      Object.entries(parsed).filter(([, zone]) => isValidZone(zone)),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function saveCameraZones() {
+  globalThis.localStorage?.setItem(CAMERA_ZONE_STORAGE_KEY, JSON.stringify(cameraZones));
+}
+
+function isValidZone(zone) {
+  return Boolean(
+    zone
+      && Number.isFinite(zone.x)
+      && Number.isFinite(zone.y)
+      && Number.isFinite(zone.width)
+      && Number.isFinite(zone.height)
+      && zone.width > 0
+      && zone.height > 0,
+  );
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function normalizedZoneFromPoints(start, end) {
+  const x1 = clamp(Math.min(start.x, end.x), 0, 1);
+  const y1 = clamp(Math.min(start.y, end.y), 0, 1);
+  const x2 = clamp(Math.max(start.x, end.x), 0, 1);
+  const y2 = clamp(Math.max(start.y, end.y), 0, 1);
+  return {
+    x: x1,
+    y: y1,
+    width: x2 - x1,
+    height: y2 - y1,
+  };
+}
+
+function pointerPositionInOverlay(event) {
+  const rect = zoneOverlay.getBoundingClientRect();
+  return {
+    x: (event.clientX - rect.left) / Math.max(rect.width, 1),
+    y: (event.clientY - rect.top) / Math.max(rect.height, 1),
+  };
+}
+
+function renderCameraZones() {
+  if (!zoneOverlay) {
+    return;
+  }
+  zoneOverlay.replaceChildren();
+  for (const [key, zone] of Object.entries(cameraZones)) {
+    if (!isValidZone(zone)) {
+      continue;
+    }
+    const box = document.createElement("div");
+    box.className = key === zoneSelect?.value ? "zone-box zone-box-active" : "zone-box";
+    box.style.left = `${zone.x * 100}%`;
+    box.style.top = `${zone.y * 100}%`;
+    box.style.width = `${zone.width * 100}%`;
+    box.style.height = `${zone.height * 100}%`;
+    const label = document.createElement("span");
+    label.textContent = ZONE_LABELS[key] ?? key;
+    box.append(label);
+    zoneOverlay.append(box);
+  }
+}
 
 function text(selector, value) {
   const element = document.querySelector(selector);
@@ -145,6 +232,15 @@ function renderRecognition(recognition) {
   text("[data-recognition-confidence]", percent(latest?.confidence ?? 0));
   text("[data-recognition-error]", recognition.last_error ?? "none");
   renderCards(document.querySelector("[data-detected-board]"), latest?.board_cards ?? [], "No detection yet");
+}
+
+function renderShowdown(showdown) {
+  text("[data-showdown-status]", showdown.status);
+  text("[data-showdown-current]", showdown.current_reveal_seat ? `S${showdown.current_reveal_seat}` : "none");
+  text(
+    "[data-showdown-winner]",
+    showdown.winner_seats?.length ? showdown.winner_seats.map((seat) => `S${seat}`).join(", ") : "none",
+  );
 }
 
 function renderPrivateStates(privateStates) {
@@ -351,6 +447,7 @@ function renderSnapshot(snapshot) {
   renderSeats(state);
   renderCards(document.querySelector("[data-board-row]"), state.board, "No board cards recognised");
   renderRecognition(state.board_recognition);
+  renderShowdown(state.showdown);
   renderPrivateStates(snapshot.private_states);
   renderClients(snapshot.client_statuses);
   renderActions(state.legal_actions);
@@ -367,7 +464,7 @@ function renderSnapshot(snapshot) {
   }
   hasRenderedInitialSnapshot = true;
   shouldPlayInitialSnapshotSpeech = false;
-  updateBoardFrameSubmission(state.waiting_for?.type === "public_board_cards");
+  updateCameraFrameSubmission(state.waiting_for);
 
   if (apiStatus) {
     apiStatus.textContent = `${state.hand_id} ${state.automation_status}`;
@@ -484,9 +581,10 @@ function stopCameraStream() {
   cameraStream = null;
 }
 
-function updateBoardFrameSubmission(enabled) {
-  shouldSubmitBoardFrames = enabled;
-  if (enabled) {
+function updateCameraFrameSubmission(waitingFor) {
+  shouldSubmitBoardFrames = waitingFor?.type === "public_board_cards";
+  pendingRevealSeat = waitingFor?.type === "revealed_cards" ? waitingFor.seat : null;
+  if (shouldSubmitBoardFrames || pendingRevealSeat) {
     startFrameLoop();
   } else {
     stopFrameLoop();
@@ -497,7 +595,7 @@ function startFrameLoop() {
   if (frameTimer) {
     return;
   }
-  setCameraStatus("Submitting board frames");
+  setCameraStatus("Submitting camera frames");
   frameTimer = globalThis.setInterval(() => {
     submitBoardFrame().catch(() => setCameraStatus("Frame submission failed"));
   }, FRAME_INTERVAL_MS);
@@ -516,7 +614,7 @@ function stopFrameLoop() {
 }
 
 async function submitBoardFrame() {
-  if (!shouldSubmitBoardFrames || frameInFlight || !cameraPreview) {
+  if ((!shouldSubmitBoardFrames && !pendingRevealSeat) || frameInFlight || !cameraPreview) {
     return;
   }
 
@@ -527,29 +625,58 @@ async function submitBoardFrame() {
 
   frameInFlight = true;
   try {
-    const dataUri = captureVideoFrame(cameraPreview);
-    const response = await fetch("/api/vision/public-board/frame", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        source: cameraDevice?.selectedOptions?.[0]?.textContent || "dashboard_browser_camera",
-        data_uri: dataUri,
-      }),
-    });
-    const payload = await response.json();
-    setCameraStatus(payload.reason ?? (response.ok ? "Frame processed" : "Frame rejected"));
+    if (pendingRevealSeat) {
+      await submitRevealedCardsFrame(pendingRevealSeat);
+      return;
+    }
+    await submitPublicBoardFrame();
   } finally {
     frameInFlight = false;
   }
 }
 
-function captureVideoFrame(video) {
-  const scale = FRAME_WIDTH / Math.max(video.videoWidth, 1);
+async function submitPublicBoardFrame() {
+  const dataUri = captureVideoFrame(cameraPreview, cameraZones.board);
+  const response = await fetch("/api/vision/public-board/frame", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      source: cameraDevice?.selectedOptions?.[0]?.textContent || "dashboard_browser_camera",
+      data_uri: dataUri,
+    }),
+  });
+  const payload = await response.json();
+  setCameraStatus(payload.reason ?? (response.ok ? "Frame processed" : "Frame rejected"));
+}
+
+async function submitRevealedCardsFrame(seat) {
+  const zone = cameraZones[`seat_${seat}`];
+  const dataUri = captureVideoFrame(cameraPreview, zone);
+  const response = await fetch("/api/vision/showdown/revealed-cards", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      seat,
+      source: cameraDevice?.selectedOptions?.[0]?.textContent || "dashboard_browser_camera",
+      data_uri: dataUri,
+    }),
+  });
+  const payload = await response.json();
+  setCameraStatus(payload.reason ?? (response.ok ? "Reveal processed" : "Reveal rejected"));
+}
+
+function captureVideoFrame(video, zone = null) {
   const canvas = document.createElement("canvas");
-  canvas.width = FRAME_WIDTH;
-  canvas.height = Math.round(video.videoHeight * scale);
+  const sourceZone = isValidZone(zone) ? zone : { x: 0, y: 0, width: 1, height: 1 };
+  const sourceX = Math.round(sourceZone.x * video.videoWidth);
+  const sourceY = Math.round(sourceZone.y * video.videoHeight);
+  const sourceWidth = Math.max(1, Math.round(sourceZone.width * video.videoWidth));
+  const sourceHeight = Math.max(1, Math.round(sourceZone.height * video.videoHeight));
+  const scale = FRAME_WIDTH / Math.max(sourceWidth, 1);
+  canvas.width = Math.round(sourceWidth * scale);
+  canvas.height = Math.round(sourceHeight * scale);
   const context = canvas.getContext("2d");
-  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  context.drawImage(video, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, canvas.width, canvas.height);
   return canvas.toDataURL(FRAME_MIME_TYPE);
 }
 
@@ -557,6 +684,43 @@ function setCameraStatus(value) {
   if (cameraStatus) {
     cameraStatus.textContent = value;
   }
+}
+
+function startZoneDrag(event) {
+  if (!zoneOverlay || !zoneSelect) {
+    return;
+  }
+  event.preventDefault();
+  zoneOverlay.setPointerCapture(event.pointerId);
+  const start = pointerPositionInOverlay(event);
+  activeZoneDrag = {
+    pointerId: event.pointerId,
+    key: zoneSelect.value,
+    start,
+  };
+  cameraZones[zoneSelect.value] = normalizedZoneFromPoints(start, start);
+  renderCameraZones();
+}
+
+function moveZoneDrag(event) {
+  if (!activeZoneDrag || activeZoneDrag.pointerId !== event.pointerId) {
+    return;
+  }
+  cameraZones[activeZoneDrag.key] = normalizedZoneFromPoints(activeZoneDrag.start, pointerPositionInOverlay(event));
+  renderCameraZones();
+}
+
+function finishZoneDrag(event) {
+  if (!activeZoneDrag || activeZoneDrag.pointerId !== event.pointerId) {
+    return;
+  }
+  const zone = cameraZones[activeZoneDrag.key];
+  if (!isValidZone(zone) || zone.width < 0.02 || zone.height < 0.02) {
+    delete cameraZones[activeZoneDrag.key];
+  }
+  activeZoneDrag = null;
+  saveCameraZones();
+  renderCameraZones();
 }
 
 for (const control of gameControls) {
@@ -581,5 +745,28 @@ if (cameraForm) {
   });
 }
 
+if (zoneOverlay) {
+  zoneOverlay.addEventListener("pointerdown", startZoneDrag);
+  zoneOverlay.addEventListener("pointermove", moveZoneDrag);
+  zoneOverlay.addEventListener("pointerup", finishZoneDrag);
+  zoneOverlay.addEventListener("pointercancel", finishZoneDrag);
+}
+
+if (zoneSelect) {
+  zoneSelect.addEventListener("change", renderCameraZones);
+}
+
+if (zoneClear) {
+  zoneClear.addEventListener("click", () => {
+    if (!zoneSelect) {
+      return;
+    }
+    delete cameraZones[zoneSelect.value];
+    saveCameraZones();
+    renderCameraZones();
+  });
+}
+
+renderCameraZones();
 await loadCameraDevices().catch(() => setCameraStatus("Camera permission needed"));
 connectEvents();

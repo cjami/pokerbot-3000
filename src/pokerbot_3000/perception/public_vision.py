@@ -12,6 +12,7 @@ from pokerbot_3000.llm import CerebrasConfig, CerebrasLlmClient
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from pokerbot_3000.domain.cards import Card
     from pokerbot_3000.ports.llm import ImageFrame, LlmGateway
 
 BOARD_CARD_READER_CONFIDENCE: Final = 0.86
@@ -66,6 +67,39 @@ class LazyGemmaPublicVisionSource:
                 llm=CerebrasLlmClient(CerebrasConfig.from_env(self._env_file)),
             )
         return await self._source.observe_frame(frame)
+
+    def _ensure_env_loaded(self) -> None:
+        load_dotenv(dotenv_path=self._env_file)
+
+
+class GemmaRevealedCardsSource:
+    """Showdown reveal source that asks Gemma to read a submitted seat crop."""
+
+    def __init__(self, llm: LlmGateway) -> None:
+        """Create a source from a task-level LLM gateway."""
+        self._llm = llm
+
+    async def read_revealed_cards(self, frame: ImageFrame) -> list[Card]:
+        """Interpret one browser-submitted revealed-card crop."""
+        return await self._llm.read_revealed_cards(frame)
+
+
+class LazyGemmaRevealedCardsSource:
+    """Lazily create the Gemma client on first revealed-card frame."""
+
+    def __init__(self, env_file: str | Path | None = None) -> None:
+        """Delay configuration loading until the recognition loop actually runs."""
+        self._env_file = env_file
+        self._source: GemmaRevealedCardsSource | None = None
+
+    async def read_revealed_cards(self, frame: ImageFrame) -> list[Card]:
+        """Interpret a browser-submitted reveal crop using lazily initialized dependencies."""
+        if self._source is None:
+            self._ensure_env_loaded()
+            self._source = GemmaRevealedCardsSource(
+                llm=CerebrasLlmClient(CerebrasConfig.from_env(self._env_file)),
+            )
+        return await self._source.read_revealed_cards(frame)
 
     def _ensure_env_loaded(self) -> None:
         load_dotenv(dotenv_path=self._env_file)

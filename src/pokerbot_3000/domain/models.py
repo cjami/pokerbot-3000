@@ -66,6 +66,8 @@ class EventType(StrEnum):
     VISION_OBSERVATION = "vision_observation"
     BOARD_CARDS_COMMITTED = "board_cards_committed"
     PRIVATE_CARD_OBSERVATION = "private_card_observation"
+    REVEALED_CARD_OBSERVATION = "revealed_card_observation"
+    SHOWDOWN_RESOLVED = "showdown_resolved"
     PRESENTATION_COMMAND = "presentation_command"
 
 
@@ -94,6 +96,7 @@ class PendingInputType(StrEnum):
     PUBLIC_BOARD_CARDS = "public_board_cards"
     HUMAN_ACTION = "human_action"
     PRIVATE_CARDS = "private_cards"
+    REVEALED_CARDS = "revealed_cards"
 
 
 class BoardRecognitionStatus(StrEnum):
@@ -102,6 +105,16 @@ class BoardRecognitionStatus(StrEnum):
     IDLE = "idle"
     WAITING = "waiting"
     DETECTING = "detecting"
+    COMPLETE = "complete"
+    ERROR = "error"
+
+
+class ShowdownStatus(StrEnum):
+    """Lifecycle status for showdown reveal and hand resolution."""
+
+    IDLE = "idle"
+    REVEALING = "revealing"
+    RUNNING_OUT = "running_out"
     COMPLETE = "complete"
     ERROR = "error"
 
@@ -183,6 +196,27 @@ class PublicBoardFrameInput(PokerBaseModel):
     data_uri: str = Field(min_length=32)
 
 
+class RevealedCardsFrameInput(PokerBaseModel):
+    """Browser-captured seat-zone frame submitted for revealed-card recognition."""
+
+    seat: int = Field(ge=1, le=3)
+    source: str = "dashboard_browser_camera"
+    data_uri: str = Field(min_length=32)
+
+
+class ShowdownSnapshot(PokerBaseModel):
+    """Public showdown/runout progress safe for all clients."""
+
+    status: ShowdownStatus = ShowdownStatus.IDLE
+    reveal_order: list[int] = Field(default_factory=list)
+    revealed_cards_by_seat: dict[int, list[Card]] = Field(default_factory=dict)
+    current_reveal_seat: int | None = Field(default=None, ge=1, le=3)
+    winner_seats: list[int] = Field(default_factory=list)
+    winning_hand: str | None = None
+    pot_awarded: int = Field(default=0, ge=0)
+    last_error: str | None = None
+
+
 class PublicGameState(PokerBaseModel):
     """Public game state that can be broadcast to all clients."""
 
@@ -203,6 +237,7 @@ class PublicGameState(PokerBaseModel):
     automation_status: str = "stopped"
     waiting_for: PendingInput | None = None
     board_recognition: BoardRecognitionSnapshot = Field(default_factory=BoardRecognitionSnapshot)
+    showdown: ShowdownSnapshot = Field(default_factory=ShowdownSnapshot)
     last_actions: list[str] = Field(default_factory=list)
     uncertainties: list[str] = Field(default_factory=list)
 

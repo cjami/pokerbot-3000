@@ -82,6 +82,22 @@ wheels = [
 ]
 
 [[package]]
+name = "eval7"
+version = "0.1.10"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "future" },
+    { name = "pyparsing" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3a/70/7d11bfc2b97ebfde6ca2adee6c8101e20ff4a12797fc308010f36a13cf1c/eval7-0.1.10.tar.gz", hash = "sha256:4549e9523e1ed7d87ab382eb88a5598f6975dd5a51831ad2589ef9484782ea73", size = 249284, upload-time = "2023-12-22T17:57:42.76Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ed/36/0b25aad9d451d607efdf484d696d1f988393edb64d72278c0f48161773a8/eval7-0.1.10-cp312-cp312-macosx_10_9_universal2.whl", hash = "sha256:f00ec6a1dff3f9bb9744e1a8f5d765eab99c1cd7805ab77f7e10e163ae5f079b", size = 219020, upload-time = "2024-01-06T15:34:13.521Z" },
+    { url = "https://files.pythonhosted.org/packages/56/67/3850bf77785517db04f159e89f3b4f4d3b850346339d5adb523fb3b74c02/eval7-0.1.10-cp312-cp312-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:6d5ca4d30ebc49fd83e8a5e5a8d59c9ec2334a7ce1c9d347b3a0f26b97039d90", size = 675333, upload-time = "2024-01-06T15:34:15.202Z" },
+    { url = "https://files.pythonhosted.org/packages/6a/41/6e8c2de61b4176b2486d53ee4c9009229c6c28744c18abec9771081d13e0/eval7-0.1.10-cp312-cp312-win32.whl", hash = "sha256:436ef766ac4b8ba0d32c9866171d1d97e04417a5d148dd560dd36ff85ac9cfbd", size = 100204, upload-time = "2024-01-06T15:34:17.059Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/79/884c070c30318182bf7d1e76d52ec50978715d2e881d2ac5a9b3f83451bd/eval7-0.1.10-cp312-cp312-win_amd64.whl", hash = "sha256:f181dcbe37b1d24ce3694df62f9e3cefdd714539fcaf3885cd0f108a8809fe16", size = 110932, upload-time = "2024-01-06T15:34:18.495Z" },
+]
+
+[[package]]
 name = "fastapi"
 version = "0.138.1"
 source = { registry = "https://pypi.org/simple" }
@@ -104,6 +120,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e6/dc/be6cbe99670cd6e4ad387123647cb08e0c32975e223f82551e914c5568a6/filelock-3.29.4.tar.gz", hash = "sha256:10cdb3656fc44541cdf30652a93fb10ec6b05325620eb316bd26893e4201538a", size = 63028, upload-time = "2026-06-13T16:12:00.744Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/13/37/a065dc3bd6e49423a6532c642ca7378d3f467b1ef44c2800c937af7f9739/filelock-3.29.4-py3-none-any.whl", hash = "sha256:dac1648087d5115554850d113e7dd8c83ab2d38e3435dde2d4f163847e57b767", size = 42757, upload-time = "2026-06-13T16:11:59.582Z" },
+]
+
+[[package]]
+name = "future"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a7/b2/4140c69c6a66432916b26158687e821ba631a4c9273c474343badf84d3ba/future-1.0.0.tar.gz", hash = "sha256:bd2968309307861edae1458a4f8a4f3598c03be43b97521076aebf5d94c07b05", size = 1228490, upload-time = "2024-02-21T11:52:38.461Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/da/71/ae30dadffc90b9006d77af76b393cb9dfbfc9629f339fc1574a1c52e6806/future-1.0.0-py3-none-any.whl", hash = "sha256:929292d34f5872e70396626ef385ec22355a1fae8ad29e1a734c3e43f9fbc216", size = 491326, upload-time = "2024-02-21T11:52:35.956Z" },
 ]
 
 [[package]]
@@ -322,6 +347,7 @@ name = "pokerbot-3000"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "eval7" },
     { name = "fastapi" },
     { name = "jinja2" },
     { name = "pydantic" },
@@ -340,6 +366,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "eval7", specifier = "==0.1.10" },
     { name = "fastapi" },
     { name = "jinja2" },
     { name = "pydantic" },
@@ -469,6 +496,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/c3/b2/bc9c9196916376152d655522fdcebac55e66de6603a76a02bca1b6414f6c/pygments-2.20.0.tar.gz", hash = "sha256:6757cd03768053ff99f3039c1a36d6c0aa0b263438fcab17520b30a303a82b5f", size = 4955991, upload-time = "2026-03-29T13:29:33.898Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f4/7e/a72dd26f3b0f4f2bf1dd8923c85f7ceb43172af56d63c7383eb62b332364/pygments-2.20.0-py3-none-any.whl", hash = "sha256:81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176", size = 1231151, upload-time = "2026-03-29T13:29:30.038Z" },
+]
+
+[[package]]
+name = "pyparsing"
+version = "3.3.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f3/91/9c6ee907786a473bf81c5f53cf703ba0957b23ab84c264080fb5a450416f/pyparsing-3.3.2.tar.gz", hash = "sha256:c777f4d763f140633dcb6d8a3eda953bf7a214dc4eff598413c070bcdc117cbc", size = 6851574, upload-time = "2026-01-21T03:57:59.36Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/10/bd/c038d7cc38edc1aa5bf91ab8068b63d4308c66c4c8bb3cbba7dfbc049f9c/pyparsing-3.3.2-py3-none-any.whl", hash = "sha256:850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d", size = 122781, upload-time = "2026-01-21T03:57:55.912Z" },
 ]
 
 [[package]]

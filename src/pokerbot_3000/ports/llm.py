@@ -49,6 +49,9 @@ class LlmGateway(Protocol):
     async def read_hole_cards(self, agent_id: str, frame: ImageFrame) -> PrivateCardObservation:
         """Read private hole cards for one agent."""
 
+    async def read_revealed_cards(self, frame: ImageFrame) -> list[Card]:
+        """Read two revealed hole cards from one seat crop."""
+
     async def decide_agent_action(
         self,
         agent_id: str,

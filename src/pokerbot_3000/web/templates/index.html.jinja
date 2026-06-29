@@ -130,14 +130,29 @@
             <button class="control-button" type="submit">Use</button>
           </form>
           <p class="camera-status" data-camera-status>Camera idle</p>
-          <video
-            class="camera-preview"
-            data-public-camera-preview
-            autoplay
-            muted
-            playsinline
-            hidden
-          ></video>
+          <div class="camera-stage" data-camera-stage>
+            <video
+              class="camera-preview"
+              data-public-camera-preview
+              autoplay
+              muted
+              playsinline
+              hidden
+            ></video>
+            <div class="zone-overlay" data-zone-overlay></div>
+          </div>
+          <form class="zone-controls" data-zone-form>
+            <label>
+              <span>Zone</span>
+              <select data-zone-select>
+                <option value="board">Board</option>
+                <option value="seat_1">Seat 1</option>
+                <option value="seat_2">Seat 2</option>
+                <option value="seat_3">Seat 3</option>
+              </select>
+            </label>
+            <button class="control-button" type="button" data-zone-clear>Clear</button>
+          </form>
           <div class="card-row" data-detected-board>
             {% if state.board_recognition.latest_observation and state.board_recognition.latest_observation.board_cards %}
               {% for card in state.board_recognition.latest_observation.board_cards %}
@@ -163,6 +178,20 @@
             <div class="row-stat">
               <dt>Issue</dt>
               <dd data-recognition-error>{{ state.board_recognition.last_error or "none" }}</dd>
+            </div>
+          </dl>
+          <dl class="mt-4 grid gap-2 text-sm">
+            <div class="row-stat">
+              <dt>Showdown</dt>
+              <dd data-showdown-status>{{ state.showdown.status }}</dd>
+            </div>
+            <div class="row-stat">
+              <dt>Reveal</dt>
+              <dd data-showdown-current>{{ "S%s"|format(state.showdown.current_reveal_seat) if state.showdown.current_reveal_seat else "none" }}</dd>
+            </div>
+            <div class="row-stat">
+              <dt>Winner</dt>
+              <dd data-showdown-winner>{{ state.showdown.winner_seats|join(", ") if state.showdown.winner_seats else "none" }}</dd>
             </div>
           </dl>
         </div>

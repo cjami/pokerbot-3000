@@ -3,10 +3,15 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
-from pokerbot_3000.app.runtime import DashboardEventBroadcaster, DashboardRuntime, PublicBoardFrameProcessor
+from pokerbot_3000.app.runtime import (
+    DashboardEventBroadcaster,
+    DashboardRuntime,
+    PublicBoardFrameProcessor,
+    RevealedCardsFrameProcessor,
+)
 from pokerbot_3000.app.server import create_app
 from pokerbot_3000.domain.cards import Card
-from pokerbot_3000.domain.models import PublicTableObservation, Street
+from pokerbot_3000.domain.models import HumanActionInput, PrivateCardObservation, PublicTableObservation, Street
 from pokerbot_3000.orchestrator import InMemoryOrchestrator
 from pokerbot_3000.ports.llm import ImageFrame
 from pokerbot_3000.ports.perception import PublicVisionSource
@@ -45,6 +50,20 @@ class StaticBoardVision:
         )
 
 
+class StaticRevealedCardsVision:
+    """Showdown reveal fake that returns configured cards."""
+
+    def __init__(self, cards: list[Card] | None = None) -> None:
+        """Initialize the fixed revealed-card output."""
+        self.cards = cards or [_card("9", "clubs"), _card("9", "diamonds")]
+        self.frames: list[ImageFrame] = []
+
+    async def read_revealed_cards(self, frame: ImageFrame) -> list[Card]:
+        """Return fixed revealed cards for one crop."""
+        self.frames.append(frame)
+        return self.cards
+
+
 class FakeVoiceClient:
     """Voice fake that returns deterministic bytes."""
 
@@ -79,10 +98,16 @@ def build_test_runtime(public_vision: PublicVisionSource | None = None) -> Dashb
         public_vision=public_vision or NoopPublicVision(),
         broadcaster=broadcaster,
     )
+    revealed_processor = RevealedCardsFrameProcessor(
+        orchestrator=orchestrator,
+        revealed_cards=StaticRevealedCardsVision(),
+        broadcaster=broadcaster,
+    )
     runtime = DashboardRuntime(
         orchestrator=orchestrator,
         broadcaster=broadcaster,
         board_processor=processor,
+        revealed_cards_processor=revealed_processor,
         voice_client_factory=FakeVoiceClient,
     )
     runtime_ref["runtime"] = runtime
@@ -186,7 +211,7 @@ def test_api_human_action_advances_until_eliza_input_needed():
     runtime = build_test_runtime()
     client = TestClient(create_app(runtime))
     client.post("/api/game/start")
-    _complete_board(runtime.orchestrator)
+    _open_human_action_after_flop(runtime.orchestrator)
 
     response = client.post(
         "/api/inputs/human-action",
@@ -201,19 +226,28 @@ def test_api_human_action_advances_until_eliza_input_needed():
     assert response.status_code == 200
     payload = response.json()
     assert payload["accepted"] is True
-    assert payload["state"]["pot"] == 100
-    assert payload["state"]["waiting_for"]["type"] == "private_cards"
-    assert payload["state"]["waiting_for"]["agent_id"] == "eliza"
+    assert payload["state"]["pot"] == 300
+    assert payload["state"]["waiting_for"]["type"] == "public_board_cards"
+    assert payload["state"]["board_recognition"]["expected_card_count"] == 4
 
 
 def test_api_thin_client_private_cards_trigger_internal_agent_turn():
     runtime = build_test_runtime()
     client = TestClient(create_app(runtime))
     client.post("/api/game/start")
-    _complete_board(runtime.orchestrator)
-    client.post(
-        "/api/inputs/human-action",
-        json={"source": "voice", "action": {"type": "bet", "amount": 100}},
+    runtime.orchestrator.record_public_observation(
+        PublicTableObservation(
+            board_cards=[_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs")],
+            street_hint=Street.FLOP,
+            confidence=0.9,
+        )
+    )
+    runtime.orchestrator.record_public_observation(
+        PublicTableObservation(
+            board_cards=[_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs")],
+            street_hint=Street.FLOP,
+            confidence=0.9,
+        )
     )
 
     response = client.post(
@@ -233,7 +267,7 @@ def test_api_thin_client_private_cards_trigger_internal_agent_turn():
     assert response.status_code == 200
     payload = response.json()
     assert payload["accepted"] is True
-    assert payload["state"]["pot"] == 200
+    assert payload["state"]["pot"] == 0
     assert payload["state"]["waiting_for"]["agent_id"] == "reachy"
     assert "agent_decision" in {event["event_type"] for event in payload["events"]}
 
@@ -297,6 +331,38 @@ def test_public_board_frame_submission_advances_recognition_from_browser_image()
     assert vision.frames[0].source == "obs_virtual_camera"
 
 
+def test_revealed_cards_frame_submission_advances_current_showdown_reveal():
+    runtime = build_test_runtime()
+    client = TestClient(create_app(runtime))
+    client.post("/api/game/start")
+    _open_human_action_after_flop(runtime.orchestrator)
+    runtime.orchestrator.submit_human_action(
+        HumanActionInput.model_validate({"source": "voice", "action": {"type": "check"}})
+    )
+    _commit_turn(runtime.orchestrator)
+    runtime.orchestrator.submit_human_action(
+        HumanActionInput.model_validate({"source": "voice", "action": {"type": "check"}})
+    )
+    _commit_river(runtime.orchestrator)
+    runtime.orchestrator.submit_human_action(
+        HumanActionInput.model_validate({"source": "voice", "action": {"type": "check"}})
+    )
+
+    response = client.post(
+        "/api/vision/showdown/revealed-cards",
+        json={"seat": 3, "source": "seat_3_crop", "data_uri": "data:image/png;base64,dGVzdGZyYW1l"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["accepted"] is True
+    assert payload["state"]["showdown"]["revealed_cards_by_seat"]["3"] == [
+        {"rank": "9", "suit": "clubs"},
+        {"rank": "9", "suit": "diamonds"},
+    ]
+    assert payload["state"]["waiting_for"]["seat"] == 2
+
+
 def _complete_board(orchestrator: InMemoryOrchestrator) -> None:
     flop = [_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs")]
     turn = [*flop, _card("king", "spades")]
@@ -308,6 +374,56 @@ def _complete_board(orchestrator: InMemoryOrchestrator) -> None:
                 street_hint={3: Street.FLOP, 4: Street.TURN, 5: Street.RIVER}[len(cards)],
                 confidence=0.9,
             )
+        )
+
+
+def _open_human_action_after_flop(orchestrator: InMemoryOrchestrator) -> None:
+    flop = [_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs")]
+    for _ in range(2):
+        orchestrator.record_public_observation(
+            PublicTableObservation(board_cards=flop, street_hint=Street.FLOP, confidence=0.9)
+        )
+    orchestrator.record_client_private_cards(
+        "eliza",
+        PrivateCardObservation(
+            agent_id="eliza",
+            seat=3,
+            hole_cards=[_card("9", "clubs"), _card("9", "diamonds")],
+            source="eliza_browser_webcam",
+            confidence=0.89,
+        ),
+    )
+    orchestrator.record_client_private_cards(
+        "reachy",
+        PrivateCardObservation(
+            agent_id="reachy",
+            seat=2,
+            hole_cards=[_card("king", "clubs"), _card("king", "diamonds")],
+            source="reachy_camera",
+            confidence=0.89,
+        ),
+    )
+
+
+def _commit_turn(orchestrator: InMemoryOrchestrator) -> None:
+    turn = [_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs"), _card("king", "spades")]
+    for _ in range(2):
+        orchestrator.record_public_observation(
+            PublicTableObservation(board_cards=turn, street_hint=Street.TURN, confidence=0.9)
+        )
+
+
+def _commit_river(orchestrator: InMemoryOrchestrator) -> None:
+    river = [
+        _card("ace", "hearts"),
+        _card("7", "diamonds"),
+        _card("2", "clubs"),
+        _card("king", "spades"),
+        _card("9", "spades"),
+    ]
+    for _ in range(2):
+        orchestrator.record_public_observation(
+            PublicTableObservation(board_cards=river, street_hint=Street.RIVER, confidence=0.9)
         )
 
 

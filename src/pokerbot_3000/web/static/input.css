@@ -25,7 +25,39 @@
   }
 
   .camera-preview {
-    @apply mb-3 aspect-video w-full rounded border border-neutral-200 bg-neutral-100 object-contain;
+    @apply aspect-video w-full rounded border border-neutral-200 bg-neutral-100 object-contain;
+  }
+
+  .camera-stage {
+    @apply relative mb-3 overflow-hidden rounded;
+  }
+
+  .zone-box {
+    @apply absolute rounded border-2 border-signal bg-signal/15 text-xs font-black uppercase text-white shadow-sm;
+  }
+
+  .zone-box span {
+    @apply absolute left-1 top-1 rounded bg-ink/80 px-1 py-0.5;
+  }
+
+  .zone-box-active {
+    @apply border-clay bg-clay/15;
+  }
+
+  .zone-controls {
+    @apply mb-3 grid gap-2 sm:grid-cols-[1fr_auto];
+  }
+
+  .zone-controls label {
+    @apply grid gap-1 text-xs font-bold uppercase tracking-[0.08em] text-neutral-600;
+  }
+
+  .zone-controls select {
+    @apply rounded border border-neutral-300 bg-white px-3 py-2 text-sm font-bold normal-case tracking-normal text-neutral-800;
+  }
+
+  .zone-overlay {
+    @apply absolute inset-0 cursor-crosshair rounded;
   }
 
   .camera-controls {

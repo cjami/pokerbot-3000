@@ -176,6 +176,19 @@ class CerebrasLlmClient:
         payload.setdefault("source", frame.source)
         return PrivateCardObservation.model_validate(payload)
 
+    async def read_revealed_cards(self, frame: ImageFrame) -> list[Card]:
+        """Read two revealed hole cards from one seat crop."""
+        payload = await self._chat_json(
+            [
+                _system_message(self._prompts.read_hole_cards_system),
+                _image_user_message(frame, self._prompts.read_hole_cards_user),
+            ],
+            max_tokens=220,
+            response_format=HOLE_CARDS_RESPONSE_FORMAT,
+        )
+        cards = payload.get("hole_cards", [])
+        return _CARD_LIST_ADAPTER.validate_python(cards)
+
     async def decide_agent_action(
         self,
         agent_id: str,

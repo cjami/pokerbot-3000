@@ -12,7 +12,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from pokerbot_3000.domain.models import EventType, ExternalInputResult
 from pokerbot_3000.orchestrator import InMemoryOrchestrator
-from pokerbot_3000.perception import LazyGemmaPublicVisionSource
+from pokerbot_3000.perception import LazyGemmaPublicVisionSource, LazyGemmaRevealedCardsSource
 from pokerbot_3000.voice import (
     ElevenLabsClient,
     ElevenLabsClientError,
@@ -22,7 +22,7 @@ from pokerbot_3000.voice import (
 if TYPE_CHECKING:
     from pokerbot_3000.domain.models import GameEvent, OperatorControlResult
     from pokerbot_3000.ports.llm import ImageFrame
-    from pokerbot_3000.ports.perception import PublicVisionSource
+    from pokerbot_3000.ports.perception import PublicVisionSource, RevealedCardsSource
 
 type DashboardMessage = dict[str, Any]
 type SnapshotFactory = Callable[[], DashboardMessage]
@@ -140,6 +140,49 @@ class PublicBoardFrameProcessor:
             )
 
 
+class RevealedCardsFrameProcessor:
+    """Process browser-submitted showdown reveal frames."""
+
+    def __init__(
+        self,
+        orchestrator: InMemoryOrchestrator,
+        revealed_cards: RevealedCardsSource,
+        broadcaster: DashboardEventBroadcaster,
+        *,
+        after_events: EventHook | None = None,
+    ) -> None:
+        """Create a frame processor around a revealed-card source and orchestrator."""
+        self._orchestrator = orchestrator
+        self._revealed_cards = revealed_cards
+        self._broadcaster = broadcaster
+        self._after_events = after_events
+        self._lock = asyncio.Lock()
+
+    async def process_frame(self, seat: int, frame: ImageFrame) -> ExternalInputResult:
+        """Ask Gemma to read one revealed seat crop and advance the orchestrator."""
+        async with self._lock:
+            event_start = self._orchestrator.event_count()
+            try:
+                cards = await self._revealed_cards.read_revealed_cards(frame)
+                result = self._orchestrator.record_revealed_cards(seat, cards, source=frame.source)
+            except Exception as exc:  # noqa: BLE001
+                result = self._orchestrator.record_revealed_cards(seat, [], source=frame.source)
+                if result.accepted:
+                    self._orchestrator.record_public_board_error(_public_error_message(exc), source=frame.source)
+                else:
+                    result = ExternalInputResult(
+                        accepted=False,
+                        reason=_public_error_message(exc),
+                        events=self._orchestrator.events_since(event_start),
+                        state=self._orchestrator.public_state(),
+                    )
+
+            if self._after_events is not None:
+                await self._after_events(result.events)
+            await self._broadcaster.publish_snapshot()
+            return result
+
+
 def _default_voice_client_factory() -> ElevenLabsClient:
     return ElevenLabsClient(ElevenLabsConfig.from_env())
 
@@ -151,6 +194,7 @@ class DashboardRuntime:
     orchestrator: InMemoryOrchestrator
     broadcaster: DashboardEventBroadcaster
     board_processor: PublicBoardFrameProcessor
+    revealed_cards_processor: RevealedCardsFrameProcessor
     voice_client_factory: VoiceClientFactory = _default_voice_client_factory
     _voice_client: SpeechSynthesisClient | None = field(default=None, init=False)
     _audio_cache: dict[str, bytes] = field(default_factory=dict, init=False)
@@ -175,7 +219,18 @@ class DashboardRuntime:
             broadcaster=broadcaster,
             after_events=handle_events,
         )
-        runtime = cls(orchestrator=orchestrator, broadcaster=broadcaster, board_processor=board_processor)
+        revealed_cards_processor = RevealedCardsFrameProcessor(
+            orchestrator=orchestrator,
+            revealed_cards=LazyGemmaRevealedCardsSource(),
+            broadcaster=broadcaster,
+            after_events=handle_events,
+        )
+        runtime = cls(
+            orchestrator=orchestrator,
+            broadcaster=broadcaster,
+            board_processor=board_processor,
+            revealed_cards_processor=revealed_cards_processor,
+        )
         runtime_ref["runtime"] = runtime
         return runtime
 
@@ -218,6 +273,10 @@ class DashboardRuntime:
     async def process_public_board_frame(self, frame: ImageFrame) -> ExternalInputResult:
         """Process one browser-submitted public-board frame."""
         return await self.board_processor.process_frame(frame)
+
+    async def process_revealed_cards_frame(self, seat: int, frame: ImageFrame) -> ExternalInputResult:
+        """Process one browser-submitted revealed-card frame."""
+        return await self.revealed_cards_processor.process_frame(seat, frame)
 
     async def handle_new_events(self, events: list[GameEvent]) -> None:
         """Handle side effects for newly appended orchestrator events."""

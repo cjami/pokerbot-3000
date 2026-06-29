@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
+    from pokerbot_3000.domain.cards import Card
     from pokerbot_3000.domain.models import PrivateCardObservation, PublicTableObservation
     from pokerbot_3000.ports.llm import ImageFrame
 
@@ -21,3 +22,10 @@ class PrivateCardSource(Protocol):
 
     async def observe_private_cards(self, agent_id: str) -> PrivateCardObservation:
         """Capture and interpret private cards for one agent."""
+
+
+class RevealedCardsSource(Protocol):
+    """Source of public showdown reveal observations."""
+
+    async def read_revealed_cards(self, frame: ImageFrame) -> list[Card]:
+        """Interpret one revealed seat crop."""

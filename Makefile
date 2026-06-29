@@ -21,4 +21,4 @@ format:
 	uv run ruff format .
 
 app: assets
-	uv run pokerbot-3000 --no-browser
+	uv run python -m pokerbot_3000 --no-browser

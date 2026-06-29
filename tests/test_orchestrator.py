@@ -3,6 +3,7 @@ import pytest
 from pokerbot_3000.domain.cards import Card
 from pokerbot_3000.domain.models import (
     HumanActionInput,
+    ObservationReceipt,
     PendingInputType,
     PrivateCardObservation,
     PublicTableObservation,
@@ -50,23 +51,22 @@ def test_orchestrator_stop_game_clears_pending_input():
     assert result.state.legal_actions == []
 
 
-def test_orchestrator_human_action_runs_until_agent_private_cards_needed():
+def test_orchestrator_flop_betting_runs_until_turn_recognition_needed():
     orchestrator = InMemoryOrchestrator()
     orchestrator.start_game()
-    _complete_board(orchestrator)
+    _open_human_action_after_flop(orchestrator)
     request = HumanActionInput.model_validate({"source": "voice", "action": {"type": "bet", "amount": 100}})
 
     result = orchestrator.submit_human_action(request)
 
     assert result.accepted is True
-    assert result.state.pot == 100
-    assert result.state.active_player_seat == 3
+    assert result.state.pot == 300
     assert result.state.waiting_for is not None
-    assert result.state.waiting_for.agent_id == "eliza"
-    assert orchestrator.events()[-1].event_type == "engine_paused"
+    assert result.state.waiting_for.type == PendingInputType.PUBLIC_BOARD_CARDS
+    assert result.state.board_recognition.expected_card_count == 4
 
 
-def test_orchestrator_commits_stable_flop_turn_and_river_before_human_action():
+def test_orchestrator_commits_flop_then_pauses_for_postflop_action():
     orchestrator = InMemoryOrchestrator()
     orchestrator.start_game()
 
@@ -88,42 +88,9 @@ def test_orchestrator_commits_stable_flop_turn_and_river_before_human_action():
 
     state = orchestrator.public_state()
     assert state.street == Street.FLOP
-    assert state.board_recognition.expected_card_count == 4
-
-    _record_public_observation(
-        orchestrator,
-        [_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs"), _card("king", "spades")],
-    )
-    _record_public_observation(
-        orchestrator,
-        [_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs"), _card("king", "spades")],
-    )
-    _record_public_observation(
-        orchestrator,
-        [
-            _card("ace", "hearts"),
-            _card("7", "diamonds"),
-            _card("2", "clubs"),
-            _card("king", "spades"),
-            _card("9", "clubs"),
-        ],
-    )
-    _record_public_observation(
-        orchestrator,
-        [
-            _card("ace", "hearts"),
-            _card("7", "diamonds"),
-            _card("2", "clubs"),
-            _card("king", "spades"),
-            _card("9", "clubs"),
-        ],
-    )
-
-    state = orchestrator.public_state()
-    assert state.street == Street.RIVER
-    assert state.board_recognition.status == "complete"
     assert state.waiting_for is not None
-    assert state.waiting_for.type == PendingInputType.HUMAN_ACTION
+    assert state.waiting_for.type == PendingInputType.PRIVATE_CARDS
+    assert state.waiting_for.agent_id == "eliza"
 
 
 def test_orchestrator_rejects_unstable_or_invalid_board_observations():
@@ -153,12 +120,7 @@ def test_orchestrator_rejects_unstable_or_invalid_board_observations():
         orchestrator,
         [_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs")],
     )
-    _record_public_observation(
-        orchestrator,
-        [_card("ace", "spades"), _card("7", "diamonds"), _card("2", "clubs"), _card("king", "spades")],
-    )
-
-    assert orchestrator.public_state().board_recognition.last_error == "Previously committed board cards changed."
+    assert orchestrator.public_state().board_recognition.last_error is None
 
 
 def test_orchestrator_records_public_observation_as_event_only():
@@ -185,9 +147,13 @@ def test_orchestrator_records_public_observation_as_event_only():
 def test_orchestrator_runs_agent_internally_after_thin_client_cards():
     orchestrator = InMemoryOrchestrator()
     orchestrator.start_game()
-    _complete_board(orchestrator)
-    orchestrator.submit_human_action(
-        HumanActionInput.model_validate({"source": "voice", "action": {"type": "bet", "amount": 100}})
+    _record_public_observation(
+        orchestrator,
+        [_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs")],
+    )
+    _record_public_observation(
+        orchestrator,
+        [_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs")],
     )
     observation = PrivateCardObservation(
         agent_id="eliza",
@@ -205,7 +171,7 @@ def test_orchestrator_runs_agent_internally_after_thin_client_cards():
     private_states = orchestrator.private_states()
     public_payload = orchestrator.public_state().model_dump()
     assert result.accepted is True
-    assert result.state.pot == 200
+    assert result.state.pot == 0
     assert result.state.waiting_for is not None
     assert result.state.waiting_for.agent_id == "reachy"
     assert [card.model_dump() for card in private_states["eliza"].hole_cards] == [
@@ -219,9 +185,13 @@ def test_orchestrator_runs_agent_internally_after_thin_client_cards():
 def test_orchestrator_rejects_mismatched_private_agent_path():
     orchestrator = InMemoryOrchestrator()
     orchestrator.start_game()
-    _complete_board(orchestrator)
-    orchestrator.submit_human_action(
-        HumanActionInput.model_validate({"source": "voice", "action": {"type": "bet", "amount": 100}})
+    _record_public_observation(
+        orchestrator,
+        [_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs")],
+    )
+    _record_public_observation(
+        orchestrator,
+        [_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs")],
     )
     observation = PrivateCardObservation(
         agent_id="eliza",
@@ -235,6 +205,74 @@ def test_orchestrator_rejects_mismatched_private_agent_path():
 
     with pytest.raises(ValueError, match="does not match"):
         orchestrator.record_client_private_cards("reachy", observation)
+
+
+def test_orchestrator_reveals_checked_river_showdown_in_table_order():
+    orchestrator = InMemoryOrchestrator()
+    orchestrator.start_game()
+    _open_human_action_after_flop(orchestrator)
+    orchestrator.submit_human_action(HumanActionInput.model_validate({"action": {"type": "check"}}))
+    _commit_turn(orchestrator)
+    orchestrator.submit_human_action(HumanActionInput.model_validate({"action": {"type": "check"}}))
+    _commit_river(orchestrator)
+
+    result = orchestrator.submit_human_action(HumanActionInput.model_validate({"action": {"type": "check"}}))
+
+    assert result.state.waiting_for is not None
+    assert result.state.waiting_for.type == PendingInputType.REVEALED_CARDS
+    assert result.state.waiting_for.seat == 3
+    assert result.state.showdown.reveal_order == [3, 2, 1]
+
+    orchestrator.record_revealed_cards(3, [_card("9", "clubs"), _card("9", "diamonds")], source="seat_3_crop")
+    orchestrator.record_revealed_cards(2, [_card("king", "clubs"), _card("king", "diamonds")], source="seat_2_crop")
+    result = orchestrator.record_revealed_cards(
+        1,
+        [_card("queen", "hearts"), _card("jack", "hearts")],
+        source="seat_1_crop",
+    )
+
+    assert result.accepted is True
+    assert result.state.street == Street.SHOWDOWN
+    assert result.state.showdown.status == "complete"
+    assert result.state.showdown.winner_seats == [2]
+    assert result.state.waiting_for is None
+
+
+def test_orchestrator_reveals_all_in_hands_before_running_remaining_streets():
+    orchestrator = InMemoryOrchestrator()
+    orchestrator.start_game()
+    _open_human_action_after_flop(orchestrator)
+
+    result = orchestrator.submit_human_action(HumanActionInput.model_validate({"action": {"type": "all_in"}}))
+
+    assert result.state.waiting_for is not None
+    assert result.state.waiting_for.type == PendingInputType.REVEALED_CARDS
+    assert result.state.showdown.reveal_order == [3, 2, 1]
+    assert result.state.board_recognition.expected_card_count == 3
+    assert result.state.pot == 6000
+
+    orchestrator.record_revealed_cards(3, [_card("9", "clubs"), _card("9", "diamonds")], source="seat_3_crop")
+    orchestrator.record_revealed_cards(2, [_card("king", "clubs"), _card("king", "diamonds")], source="seat_2_crop")
+    result = orchestrator.record_revealed_cards(
+        1,
+        [_card("queen", "hearts"), _card("jack", "hearts")],
+        source="seat_1_crop",
+    )
+
+    assert result.state.waiting_for is not None
+    assert result.state.waiting_for.type == PendingInputType.PUBLIC_BOARD_CARDS
+    assert result.state.board_recognition.expected_card_count == 4
+
+    _commit_turn(orchestrator)
+    result = _commit_river(orchestrator)
+
+    state = orchestrator.public_state()
+    assert result.accepted is True
+    assert state.street == Street.SHOWDOWN
+    assert state.showdown.status == "complete"
+    assert state.showdown.winner_seats == [2]
+    assert state.pot == 0
+    assert state.players[2].stack == 6000
 
 
 def _card(rank: str, suit: str) -> Card:
@@ -253,6 +291,54 @@ def _record_public_observation(
             street_hint={0: Street.PREFLOP, 3: Street.FLOP, 4: Street.TURN, 5: Street.RIVER}.get(len(cards)),
             confidence=confidence,
         )
+    )
+
+
+def _open_human_action_after_flop(orchestrator: InMemoryOrchestrator) -> None:
+    flop = [_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs")]
+    _record_public_observation(orchestrator, flop)
+    _record_public_observation(orchestrator, flop)
+    orchestrator.record_client_private_cards(
+        "eliza",
+        PrivateCardObservation(
+            agent_id="eliza",
+            seat=3,
+            hole_cards=[_card("9", "clubs"), _card("9", "diamonds")],
+            source="eliza_browser_webcam",
+            confidence=0.91,
+        ),
+    )
+    orchestrator.record_client_private_cards(
+        "reachy",
+        PrivateCardObservation(
+            agent_id="reachy",
+            seat=2,
+            hole_cards=[_card("king", "clubs"), _card("king", "diamonds")],
+            source="reachy_camera",
+            confidence=0.91,
+        ),
+    )
+
+
+def _commit_turn(orchestrator: InMemoryOrchestrator) -> ObservationReceipt:
+    turn = [_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs"), _card("king", "spades")]
+    _record_public_observation(orchestrator, turn)
+    return orchestrator.record_public_observation(
+        PublicTableObservation(board_cards=turn, street_hint=Street.TURN, confidence=0.9)
+    )
+
+
+def _commit_river(orchestrator: InMemoryOrchestrator) -> ObservationReceipt:
+    river = [
+        _card("ace", "hearts"),
+        _card("7", "diamonds"),
+        _card("2", "clubs"),
+        _card("king", "spades"),
+        _card("9", "spades"),
+    ]
+    _record_public_observation(orchestrator, river)
+    return orchestrator.record_public_observation(
+        PublicTableObservation(board_cards=river, street_hint=Street.RIVER, confidence=0.9)
     )
 
 
