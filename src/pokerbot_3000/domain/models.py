@@ -59,9 +59,12 @@ class EventType(StrEnum):
     SYSTEM = "system"
     GAME_STARTED = "game_started"
     GAME_STOPPED = "game_stopped"
+    HAND_STARTED = "hand_started"
+    BLIND_POSTED = "blind_posted"
     ACTION_PROPOSED = "action_proposed"
     ACTION_COMMITTED = "action_committed"
     AGENT_DECISION = "agent_decision"
+    AGENT_DECISION_FAILED = "agent_decision_failed"
     ENGINE_PAUSED = "engine_paused"
     VISION_OBSERVATION = "vision_observation"
     BOARD_CARDS_COMMITTED = "board_cards_committed"
@@ -96,6 +99,7 @@ class PendingInputType(StrEnum):
     PUBLIC_BOARD_CARDS = "public_board_cards"
     HUMAN_ACTION = "human_action"
     PRIVATE_CARDS = "private_cards"
+    AGENT_ACTION = "agent_action"
     REVEALED_CARDS = "revealed_cards"
 
 
@@ -152,6 +156,7 @@ class PlayerState(PokerBaseModel):
     status: PlayerStatus
     stack: int = Field(ge=0)
     committed_this_street: int = Field(default=0, ge=0)
+    committed_this_hand: int = Field(default=0, ge=0)
 
 
 class PendingInput(PokerBaseModel):
@@ -224,21 +229,35 @@ class ShowdownSnapshot(PokerBaseModel):
     last_error: str | None = None
 
 
+class SidePotSnapshot(PokerBaseModel):
+    """Public side-pot summary for all-in hand resolution."""
+
+    amount: int = Field(ge=0)
+    eligible_seats: list[int] = Field(default_factory=list)
+
+
 class PublicGameState(PokerBaseModel):
     """Public game state that can be broadcast to all clients."""
 
     hand_id: str
+    hand_number: int = Field(default=1, ge=1)
     game_type: str = "texas_holdem"
     betting_structure: str = "no_limit"
     street: Street
     dealer_seat: int = Field(ge=1, le=3)
+    small_blind_seat: int | None = Field(default=None, ge=1, le=3)
+    big_blind_seat: int | None = Field(default=None, ge=1, le=3)
+    small_blind: int = Field(default=10, ge=0)
+    big_blind: int = Field(default=20, ge=0)
     active_player_seat: int = Field(ge=1, le=3)
     board: list[Card] = Field(default_factory=list, max_length=5)
     board_source: str = "manual"
     board_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     pot: int = Field(default=0, ge=0)
     current_bet_to_call: int = Field(default=0, ge=0)
+    active_to_call: int = Field(default=0, ge=0)
     min_raise_to: int = Field(default=20, ge=0)
+    side_pots: list[SidePotSnapshot] = Field(default_factory=list)
     players: dict[int, PlayerState]
     legal_actions: list[ActionType] = Field(default_factory=list)
     automation_status: str = "stopped"

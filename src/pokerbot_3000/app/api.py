@@ -82,10 +82,7 @@ def _create_input_router(runtime: DashboardRuntime) -> APIRouter:
     @router.post("/inputs/human-action", response_model=ExternalInputResult)
     async def submit_human_action(request: HumanActionInput) -> ExternalInputResult:
         """Consume human action input and advance the engine until blocked."""
-        result = orchestrator.submit_human_action(request)
-        await runtime.handle_new_events(result.events)
-        await runtime.broadcaster.publish_snapshot()
-        return result
+        return await runtime.submit_human_action(request)
 
     @router.post("/clients/{agent_id}/private-cards", response_model=ExternalInputResult)
     async def record_client_private_cards(
@@ -94,11 +91,9 @@ def _create_input_router(runtime: DashboardRuntime) -> APIRouter:
     ) -> ExternalInputResult:
         """Consume private-card input from a thin Reachy or Eliza client."""
         try:
-            result = orchestrator.record_client_private_cards(agent_id, observation)
+            result = await runtime.record_client_private_cards(agent_id, observation)
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-        await runtime.handle_new_events(result.events)
-        await runtime.broadcaster.publish_snapshot()
         return result
 
     @router.post("/clients/{agent_id}/private-cards/frame", response_model=ExternalInputResult)

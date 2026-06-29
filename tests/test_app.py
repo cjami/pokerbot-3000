@@ -5,6 +5,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from pokerbot_3000.app.runtime import (
+    AgentActionProcessor,
     DashboardEventBroadcaster,
     DashboardRuntime,
     PrivateCardsFrameProcessor,
@@ -13,9 +14,17 @@ from pokerbot_3000.app.runtime import (
 )
 from pokerbot_3000.app.server import create_app
 from pokerbot_3000.domain.cards import Card
-from pokerbot_3000.domain.models import HumanActionInput, PrivateCardObservation, PublicTableObservation, Street
+from pokerbot_3000.domain.models import (
+    HumanActionInput,
+    PokerAction,
+    PrivateAgentState,
+    PrivateCardObservation,
+    PublicGameState,
+    PublicTableObservation,
+    Street,
+)
 from pokerbot_3000.orchestrator import InMemoryOrchestrator
-from pokerbot_3000.ports.llm import ImageFrame
+from pokerbot_3000.ports.llm import AgentDecision, ImageFrame
 from pokerbot_3000.ports.perception import PublicVisionSource
 from pokerbot_3000.voice import BrowserAudioInput
 
@@ -117,6 +126,32 @@ class RecordingVoiceClient:
         return f"eliza:{text}".encode()
 
 
+class FakeAgentDecisions:
+    """Agent-decision fake that picks a simple legal action."""
+
+    async def decide_agent_action(
+        self,
+        agent_id: str,
+        public_state: PublicGameState,
+        private_state: PrivateAgentState,
+    ) -> AgentDecision:
+        """Return a legal deterministic decision for app tests."""
+        _ = private_state
+        if "call" in public_state.legal_actions:
+            action = PokerAction.model_validate({"type": "call"})
+        elif "check" in public_state.legal_actions:
+            action = PokerAction.model_validate({"type": "check"})
+        else:
+            action = PokerAction.model_validate({"type": "fold"})
+        return AgentDecision(
+            agent_id=agent_id,
+            action=action,
+            speech=f"{agent_id} {action.type}",
+            reaction={"intent": "announce_action"},
+            confidence=0.9,
+        )
+
+
 def build_test_runtime(public_vision: PublicVisionSource | None = None) -> DashboardRuntime:
     orchestrator = InMemoryOrchestrator()
     runtime_ref: dict[str, DashboardRuntime] = {}
@@ -140,12 +175,18 @@ def build_test_runtime(public_vision: PublicVisionSource | None = None) -> Dashb
         revealed_cards=StaticRevealedCardsVision(),
         broadcaster=broadcaster,
     )
+    agent_action_processor = AgentActionProcessor(
+        orchestrator=orchestrator,
+        decisions=FakeAgentDecisions(),
+        broadcaster=broadcaster,
+    )
     runtime = DashboardRuntime(
         orchestrator=orchestrator,
         broadcaster=broadcaster,
         board_processor=processor,
         private_cards_processor=private_processor,
         revealed_cards_processor=revealed_processor,
+        agent_action_processor=agent_action_processor,
         voice_client_factory=FakeVoiceClient,
     )
     runtime_ref["runtime"] = runtime
@@ -216,8 +257,9 @@ def test_api_start_and_stop_game():
         start_payload = start_response.json()
         assert start_payload["accepted"] is True
         assert start_payload["state"]["automation_status"] == "waiting_for_external_input"
-        assert start_payload["state"]["waiting_for"]["type"] == "public_board_cards"
-        assert runtime.board_processor.is_waiting_for_frames is True
+        assert start_payload["state"]["waiting_for"]["type"] == "human_action"
+        assert start_payload["state"]["pot"] == 30
+        assert runtime.board_processor.is_waiting_for_frames is False
 
         stop_response = client.post("/api/game/stop")
 
@@ -229,6 +271,14 @@ def test_api_start_and_stop_game():
         assert runtime.board_processor.is_waiting_for_frames is False
 
 
+def test_api_does_not_expose_operator_next_hand_control():
+    client = TestClient(create_app(build_test_runtime()))
+
+    response = client.post("/api/game/next-hand")
+
+    assert response.status_code == 404
+
+
 def test_api_start_queues_orchestrator_speech_for_browser_playback():
     runtime = build_test_runtime()
     with TestClient(create_app(runtime)) as client:
@@ -236,7 +286,7 @@ def test_api_start_queues_orchestrator_speech_for_browser_playback():
 
     speech_events = [event for event in payload["events"] if event["event_type"] == "presentation_command"]
     assert speech_events[0]["payload"]["voice"] == "orchestrator"
-    assert speech_events[0]["payload"]["speech"] == "Please lay out the flop."
+    assert speech_events[0]["payload"]["speech"].startswith("Move the dealer button to Che.")
 
 
 def test_runtime_prewarms_orchestrator_voice_for_new_speech_events():
@@ -249,9 +299,13 @@ def test_runtime_prewarms_orchestrator_voice_for_new_speech_events():
         await asyncio.sleep(0)
 
         speech_event = next(event for event in result.events if event.event_type == "presentation_command")
-        assert voice.calls == ["Please lay out the flop."]
-        assert await runtime.synthesize_orchestrator_event(speech_event.event_id) == b"audio:Please lay out the flop."
-        assert voice.calls == ["Please lay out the flop."]
+        expected = (
+            "Move the dealer button to Che. Eliza posts small blind 10. "
+            "Reachy posts big blind 20. Deal two cards. Action is on Che."
+        )
+        assert voice.calls == [expected]
+        assert await runtime.synthesize_orchestrator_event(speech_event.event_id) == f"audio:{expected}".encode()
+        assert voice.calls == [expected]
 
     asyncio.run(scenario())
 
@@ -275,7 +329,7 @@ def test_api_human_action_advances_until_eliza_input_needed():
     assert response.status_code == 200
     payload = response.json()
     assert payload["accepted"] is True
-    assert payload["state"]["pot"] == 300
+    assert payload["state"]["pot"] == 360
     assert payload["state"]["waiting_for"]["type"] == "public_board_cards"
     assert payload["state"]["board_recognition"]["expected_card_count"] == 4
     assert "action_proposed" in {event["event_type"] for event in payload["events"]}
@@ -286,20 +340,7 @@ def test_api_thin_client_private_cards_trigger_internal_agent_turn():
     runtime = build_test_runtime()
     client = TestClient(create_app(runtime))
     client.post("/api/game/start")
-    runtime.orchestrator.record_public_observation(
-        PublicTableObservation(
-            board_cards=[_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs")],
-            street_hint=Street.FLOP,
-            confidence=0.9,
-        )
-    )
-    runtime.orchestrator.record_public_observation(
-        PublicTableObservation(
-            board_cards=[_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs")],
-            street_hint=Street.FLOP,
-            confidence=0.9,
-        )
-    )
+    client.post("/api/inputs/human-action", json={"action": {"type": "call"}})
 
     response = client.post(
         "/api/clients/eliza/private-cards",
@@ -318,7 +359,7 @@ def test_api_thin_client_private_cards_trigger_internal_agent_turn():
     assert response.status_code == 200
     payload = response.json()
     assert payload["accepted"] is True
-    assert payload["state"]["pot"] == 0
+    assert payload["state"]["pot"] == 60
     assert payload["state"]["waiting_for"]["agent_id"] == "reachy"
     assert "agent_decision" in {event["event_type"] for event in payload["events"]}
 
@@ -327,20 +368,7 @@ def test_api_thin_client_private_card_frame_triggers_internal_agent_turn():
     runtime = build_test_runtime()
     client = TestClient(create_app(runtime))
     client.post("/api/game/start")
-    runtime.orchestrator.record_public_observation(
-        PublicTableObservation(
-            board_cards=[_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs")],
-            street_hint=Street.FLOP,
-            confidence=0.9,
-        )
-    )
-    runtime.orchestrator.record_public_observation(
-        PublicTableObservation(
-            board_cards=[_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs")],
-            street_hint=Street.FLOP,
-            confidence=0.9,
-        )
-    )
+    client.post("/api/inputs/human-action", json={"action": {"type": "call"}})
 
     response = client.post(
         "/api/clients/eliza/private-cards/frame",
@@ -399,7 +427,7 @@ def test_websocket_receives_initial_snapshot_and_start_update():
         update = websocket.receive_json()
 
     assert update["type"] == "snapshot"
-    assert update["state"]["waiting_for"]["type"] == "public_board_cards"
+    assert update["state"]["waiting_for"]["type"] == "human_action"
     assert "game_started" in {event["event_type"] for event in update["events"]}
 
 
@@ -458,6 +486,27 @@ def test_public_board_frame_submission_advances_recognition_from_browser_image()
     runtime = build_test_runtime(vision)
     client = TestClient(create_app(runtime))
     client.post("/api/game/start")
+    client.post("/api/inputs/human-action", json={"action": {"type": "call"}})
+    client.post(
+        "/api/clients/eliza/private-cards",
+        json={
+            "agent_id": "eliza",
+            "seat": 3,
+            "hole_cards": [{"rank": "9", "suit": "clubs"}, {"rank": "9", "suit": "diamonds"}],
+            "source": "eliza_browser_webcam",
+            "confidence": 0.89,
+        },
+    )
+    client.post(
+        "/api/clients/reachy/private-cards",
+        json={
+            "agent_id": "reachy",
+            "seat": 2,
+            "hole_cards": [{"rank": "king", "suit": "clubs"}, {"rank": "king", "suit": "diamonds"}],
+            "source": "reachy_camera",
+            "confidence": 0.89,
+        },
+    )
 
     first_response = client.post(
         "/api/vision/public-board/frame",
@@ -527,10 +576,7 @@ def _complete_board(orchestrator: InMemoryOrchestrator) -> None:
 
 def _open_human_action_after_flop(orchestrator: InMemoryOrchestrator) -> None:
     flop = [_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs")]
-    for _ in range(2):
-        orchestrator.record_public_observation(
-            PublicTableObservation(board_cards=flop, street_hint=Street.FLOP, confidence=0.9)
-        )
+    orchestrator.submit_human_action(HumanActionInput.model_validate({"action": {"type": "call"}}))
     orchestrator.record_client_private_cards(
         "eliza",
         PrivateCardObservation(
@@ -541,6 +587,7 @@ def _open_human_action_after_flop(orchestrator: InMemoryOrchestrator) -> None:
             confidence=0.89,
         ),
     )
+    orchestrator.submit_agent_decision(_decision("eliza", "call"))
     orchestrator.record_client_private_cards(
         "reachy",
         PrivateCardObservation(
@@ -551,6 +598,13 @@ def _open_human_action_after_flop(orchestrator: InMemoryOrchestrator) -> None:
             confidence=0.89,
         ),
     )
+    orchestrator.submit_agent_decision(_decision("reachy", "check"))
+    for _ in range(2):
+        orchestrator.record_public_observation(
+            PublicTableObservation(board_cards=flop, street_hint=Street.FLOP, confidence=0.9)
+        )
+    orchestrator.submit_agent_decision(_decision("eliza", "check"))
+    orchestrator.submit_agent_decision(_decision("reachy", "check"))
 
 
 def _commit_turn(orchestrator: InMemoryOrchestrator) -> None:
@@ -559,6 +613,8 @@ def _commit_turn(orchestrator: InMemoryOrchestrator) -> None:
         orchestrator.record_public_observation(
             PublicTableObservation(board_cards=turn, street_hint=Street.TURN, confidence=0.9)
         )
+    orchestrator.submit_agent_decision(_decision("eliza", "check"))
+    orchestrator.submit_agent_decision(_decision("reachy", "check"))
 
 
 def _commit_river(orchestrator: InMemoryOrchestrator) -> None:
@@ -573,6 +629,18 @@ def _commit_river(orchestrator: InMemoryOrchestrator) -> None:
         orchestrator.record_public_observation(
             PublicTableObservation(board_cards=river, street_hint=Street.RIVER, confidence=0.9)
         )
+    orchestrator.submit_agent_decision(_decision("eliza", "check"))
+    orchestrator.submit_agent_decision(_decision("reachy", "check"))
+
+
+def _decision(agent_id: str, action_type: str, amount: int | None = None) -> AgentDecision:
+    return AgentDecision(
+        agent_id=agent_id,
+        action=PokerAction.model_validate({"type": action_type, "amount": amount}),
+        speech=f"{agent_id} {action_type}",
+        reaction={"intent": "announce_action"},
+        confidence=0.9,
+    )
 
 
 def _card(rank: str, suit: str) -> Card:

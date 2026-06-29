@@ -10,7 +10,7 @@ from pokerbot_3000.domain.models import (
     PublicGameState,
     Street,
 )
-from pokerbot_3000.orchestrator.service import DemoDefaults, InMemoryOrchestrator
+from pokerbot_3000.orchestrator import DemoDefaults, InMemoryOrchestrator
 
 
 def test_card_accepts_structured_rank_and_suit():

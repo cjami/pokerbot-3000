@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from pokerbot_3000.domain.models import (
         GameEvent,
         PokerAction,
+        PrivateAgentState,
         PrivateCardObservation,
         PublicGameState,
         PublicTableObservation,
@@ -56,7 +57,7 @@ class LlmGateway(Protocol):
         self,
         agent_id: str,
         public_state: PublicGameState,
-        private_state: PrivateCardObservation,
+        private_state: PrivateAgentState,
     ) -> AgentDecision:
         """Choose an agent action from public and private state."""
 

@@ -133,6 +133,10 @@
     @apply grid size-8 place-items-center rounded-full border border-clay bg-white text-sm font-black text-clay;
   }
 
+  .blind-badge {
+    @apply grid size-8 place-items-center rounded-full border border-neutral-300 bg-neutral-100 text-xs font-black text-neutral-700;
+  }
+
   .empty-state {
     @apply text-sm font-semibold text-neutral-500;
   }

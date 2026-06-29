@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from fastapi import WebSocket, WebSocketDisconnect
 
 from pokerbot_3000.domain.models import ClientId, EventType, ExternalInputResult
+from pokerbot_3000.llm import CerebrasConfig, CerebrasLlmClient
 from pokerbot_3000.orchestrator import InMemoryOrchestrator
 from pokerbot_3000.perception import (
     LazyGemmaPrivateCardSource,
@@ -31,8 +32,15 @@ from pokerbot_3000.voice import (
 )
 
 if TYPE_CHECKING:
-    from pokerbot_3000.domain.models import GameEvent, OperatorControlResult
-    from pokerbot_3000.ports.llm import ImageFrame
+    from pokerbot_3000.domain.models import (
+        GameEvent,
+        HumanActionInput,
+        OperatorControlResult,
+        PrivateAgentState,
+        PrivateCardObservation,
+        PublicGameState,
+    )
+    from pokerbot_3000.ports.llm import AgentDecision, ImageFrame
     from pokerbot_3000.ports.perception import PrivateCardSource, PublicVisionSource, RevealedCardsSource
     from pokerbot_3000.voice.coordinator import VoiceActionCoordinator as VoiceActionCoordinatorType
 
@@ -52,6 +60,37 @@ class SpeechSynthesisClient(Protocol):
 
 
 type VoiceClientFactory = Callable[[], SpeechSynthesisClient]
+
+
+class AgentDecisionSource(Protocol):
+    """Minimal LLM contract for poker agent decisions."""
+
+    async def decide_agent_action(
+        self,
+        agent_id: str,
+        public_state: PublicGameState,
+        private_state: PrivateAgentState,
+    ) -> AgentDecision:
+        """Choose one poker action for the active agent."""
+
+
+class LazyGemmaAgentDecisionSource:
+    """Lazy Cerebras/Gemma agent decision source."""
+
+    def __init__(self) -> None:
+        """Create a lazy source without reading environment yet."""
+        self._llm: CerebrasLlmClient | None = None
+
+    async def decide_agent_action(
+        self,
+        agent_id: str,
+        public_state: PublicGameState,
+        private_state: PrivateAgentState,
+    ) -> AgentDecision:
+        """Choose one poker action using Gemma."""
+        if self._llm is None:
+            self._llm = CerebrasLlmClient(CerebrasConfig.from_env())
+        return await self._llm.decide_agent_action(agent_id, public_state, private_state)
 
 
 class DashboardEventBroadcaster:
@@ -239,6 +278,55 @@ class PrivateCardsFrameProcessor:
             return result
 
 
+class AgentActionProcessor:
+    """Drain pending Gemma agent-action turns."""
+
+    def __init__(
+        self,
+        *,
+        orchestrator: InMemoryOrchestrator,
+        decisions: AgentDecisionSource,
+        broadcaster: DashboardEventBroadcaster,
+        after_events: EventHook | None = None,
+    ) -> None:
+        """Create a processor around an LLM decision source."""
+        self._orchestrator = orchestrator
+        self._decisions = decisions
+        self._broadcaster = broadcaster
+        self._after_events = after_events
+        self._lock = asyncio.Lock()
+
+    async def process_pending(self) -> list[GameEvent]:
+        """Process queued agent actions until the engine blocks elsewhere."""
+        async with self._lock:
+            all_events: list[GameEvent] = []
+            while agent_id := self._orchestrator.pending_agent_action():
+                event_start = self._orchestrator.event_count()
+                try:
+                    decision = await self._decisions.decide_agent_action(
+                        agent_id,
+                        self._orchestrator.public_state(),
+                        self._orchestrator.private_state_for_agent(agent_id),
+                    )
+                    result = self._orchestrator.submit_agent_decision(decision)
+                except Exception as exc:  # noqa: BLE001
+                    self._orchestrator.record_agent_decision_failed(agent_id, _public_error_message(exc))
+                    result = ExternalInputResult(
+                        accepted=False,
+                        reason=_public_error_message(exc),
+                        events=self._orchestrator.events_since(event_start),
+                        state=self._orchestrator.public_state(),
+                    )
+
+                all_events.extend(result.events)
+                if self._after_events is not None:
+                    await self._after_events(result.events)
+                await self._broadcaster.publish_snapshot()
+                if not result.accepted:
+                    break
+            return all_events
+
+
 def _default_voice_client_factory() -> ElevenLabsClient:
     return ElevenLabsClient(ElevenLabsConfig.from_env())
 
@@ -252,6 +340,7 @@ class DashboardRuntime:
     board_processor: PublicBoardFrameProcessor
     private_cards_processor: PrivateCardsFrameProcessor
     revealed_cards_processor: RevealedCardsFrameProcessor
+    agent_action_processor: AgentActionProcessor | None = None
     voice_coordinator: VoiceActionCoordinatorType | None = None
     browser_voice_input: BrowserAudioInput | None = None
     voice_client_factory: VoiceClientFactory = _default_voice_client_factory
@@ -290,6 +379,12 @@ class DashboardRuntime:
             broadcaster=broadcaster,
             after_events=handle_events,
         )
+        agent_action_processor = AgentActionProcessor(
+            orchestrator=orchestrator,
+            decisions=LazyGemmaAgentDecisionSource(),
+            broadcaster=broadcaster,
+            after_events=handle_events,
+        )
         browser_voice_input = BrowserAudioInput()
         voice_coordinator = VoiceActionCoordinator(
             orchestrator=orchestrator,
@@ -308,6 +403,7 @@ class DashboardRuntime:
             board_processor=board_processor,
             private_cards_processor=private_cards_processor,
             revealed_cards_processor=revealed_cards_processor,
+            agent_action_processor=agent_action_processor,
             voice_coordinator=voice_coordinator,
             browser_voice_input=browser_voice_input,
         )
@@ -324,6 +420,7 @@ class DashboardRuntime:
         result = self.orchestrator.start_game()
         if result.accepted:
             await self.handle_new_events(result.events)
+            await self.process_pending_agent_actions()
         await self.broadcaster.publish_snapshot()
         return result
 
@@ -403,15 +500,53 @@ class DashboardRuntime:
 
     async def process_public_board_frame(self, frame: ImageFrame) -> ExternalInputResult:
         """Process one browser-submitted public-board frame."""
-        return await self.board_processor.process_frame(frame)
+        result = await self.board_processor.process_frame(frame)
+        return await self._with_pending_agent_events(result)
 
     async def process_private_cards_frame(self, agent_id: str, frame: ImageFrame) -> ExternalInputResult:
         """Process one thin-client private-card frame."""
-        return await self.private_cards_processor.process_frame(agent_id, frame)
+        result = await self.private_cards_processor.process_frame(agent_id, frame)
+        return await self._with_pending_agent_events(result)
 
     async def process_revealed_cards_frame(self, seat: int, frame: ImageFrame) -> ExternalInputResult:
         """Process one browser-submitted revealed-card frame."""
-        return await self.revealed_cards_processor.process_frame(seat, frame)
+        result = await self.revealed_cards_processor.process_frame(seat, frame)
+        return await self._with_pending_agent_events(result)
+
+    async def submit_human_action(self, request: HumanActionInput) -> ExternalInputResult:
+        """Consume a human action and drain any resulting agent turns."""
+        result = self.orchestrator.submit_human_action(request)
+        await self.handle_new_events(result.events)
+        await self.broadcaster.publish_snapshot()
+        return await self._with_pending_agent_events(result)
+
+    async def record_client_private_cards(
+        self,
+        agent_id: str,
+        observation: PrivateCardObservation,
+    ) -> ExternalInputResult:
+        """Consume structured private-card input and drain resulting agent turns."""
+        result = self.orchestrator.record_client_private_cards(agent_id, observation)
+        await self.handle_new_events(result.events)
+        await self.broadcaster.publish_snapshot()
+        return await self._with_pending_agent_events(result)
+
+    async def process_pending_agent_actions(self) -> list[GameEvent]:
+        """Drain pending Gemma agent decisions if configured."""
+        if self.agent_action_processor is None:
+            return []
+        return await self.agent_action_processor.process_pending()
+
+    async def _with_pending_agent_events(self, result: ExternalInputResult) -> ExternalInputResult:
+        agent_events = await self.process_pending_agent_actions()
+        if not agent_events:
+            return result
+        return result.model_copy(
+            update={
+                "events": [*result.events, *agent_events],
+                "state": self.orchestrator.public_state(),
+            },
+        )
 
     async def handle_new_events(self, events: list[GameEvent]) -> None:
         """Handle side effects for newly appended orchestrator events."""

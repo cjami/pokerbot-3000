@@ -213,6 +213,18 @@ function renderSeats(state) {
       dealer.textContent = "D";
       header.append(dealer);
     }
+    if (Number(seat) === state.small_blind_seat) {
+      const blind = document.createElement("span");
+      blind.className = "blind-badge";
+      blind.textContent = "SB";
+      header.append(blind);
+    }
+    if (Number(seat) === state.big_blind_seat) {
+      const blind = document.createElement("span");
+      blind.className = "blind-badge";
+      blind.textContent = "BB";
+      header.append(blind);
+    }
 
     const stats = document.createElement("dl");
     stats.className = "mt-4 grid gap-2 text-sm";
@@ -220,6 +232,7 @@ function renderSeats(state) {
       rowStat("Status", player.status),
       rowStat("Stack", String(player.stack)),
       rowStat("Committed", String(player.committed_this_street)),
+      rowStat("Hand", String(player.committed_this_hand)),
     );
     article.append(header, stats);
     grid.append(article);
@@ -472,7 +485,7 @@ function renderSnapshot(snapshot) {
   text("[data-engine-status]", state.automation_status);
   text("[data-active-seat]", `S${state.active_player_seat}`);
   text("[data-waiting-reason]", state.waiting_for?.reason ?? "none");
-  text("[data-to-call]", String(state.current_bet_to_call));
+  text("[data-to-call]", String(state.active_to_call));
   text("[data-min-raise]", String(state.min_raise_to));
 
   renderSeats(state);

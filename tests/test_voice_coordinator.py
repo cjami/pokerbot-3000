@@ -3,8 +3,16 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from pokerbot_3000.domain.cards import Card
-from pokerbot_3000.domain.models import PendingInputType, PrivateCardObservation, PublicTableObservation, Street
+from pokerbot_3000.domain.models import (
+    HumanActionInput,
+    PendingInputType,
+    PokerAction,
+    PrivateCardObservation,
+    PublicTableObservation,
+    Street,
+)
 from pokerbot_3000.orchestrator import InMemoryOrchestrator
+from pokerbot_3000.ports.llm import AgentDecision
 from pokerbot_3000.ports.voice import AudioChunk, VoiceTranscript
 from pokerbot_3000.voice import DeterministicVoiceCommandParser, VoiceActionAdapters, VoiceActionCoordinator
 
@@ -65,7 +73,7 @@ def test_voice_coordinator_submits_parsed_action_when_waiting_for_human():
         await _wait_for(lambda: coordinator.status.latest_action is not None)
         await coordinator.stop()
 
-        assert orchestrator.public_state().pot == 300
+        assert orchestrator.public_state().pot == 160
         assert "action_proposed" in events_seen
         assert "action_committed" in events_seen
         assert coordinator.status.latest_action == {"type": "bet", "amount": 100, "unit": "chips"}
@@ -78,6 +86,7 @@ def test_voice_coordinator_ignores_segments_when_not_waiting_for_human():
     async def scenario() -> None:
         orchestrator = InMemoryOrchestrator()
         orchestrator.start_game()
+        _complete_preflop(orchestrator)
         transcriber = _StaticTranscriber("check")
         coordinator = VoiceActionCoordinator(
             orchestrator=orchestrator,
@@ -111,11 +120,18 @@ async def _wait_for(predicate) -> None:
 
 
 def _open_human_action_after_flop(orchestrator: InMemoryOrchestrator) -> None:
+    _complete_preflop(orchestrator)
     flop = [_card("ace", "hearts"), _card("7", "diamonds"), _card("2", "clubs")]
     for _ in range(2):
         orchestrator.record_public_observation(
             PublicTableObservation(board_cards=flop, street_hint=Street.FLOP, confidence=0.9)
         )
+    orchestrator.submit_agent_decision(_decision("eliza", "check"))
+    orchestrator.submit_agent_decision(_decision("reachy", "check"))
+
+
+def _complete_preflop(orchestrator: InMemoryOrchestrator) -> None:
+    orchestrator.submit_human_action(HumanActionInput.model_validate({"action": {"type": "call"}}))
     orchestrator.record_client_private_cards(
         "eliza",
         PrivateCardObservation(
@@ -126,6 +142,7 @@ def _open_human_action_after_flop(orchestrator: InMemoryOrchestrator) -> None:
             confidence=0.89,
         ),
     )
+    orchestrator.submit_agent_decision(_decision("eliza", "call"))
     orchestrator.record_client_private_cards(
         "reachy",
         PrivateCardObservation(
@@ -135,6 +152,17 @@ def _open_human_action_after_flop(orchestrator: InMemoryOrchestrator) -> None:
             source="reachy_camera",
             confidence=0.89,
         ),
+    )
+    orchestrator.submit_agent_decision(_decision("reachy", "check"))
+
+
+def _decision(agent_id: str, action_type: str, amount: int | None = None) -> AgentDecision:
+    return AgentDecision(
+        agent_id=agent_id,
+        action=PokerAction.model_validate({"type": action_type, "amount": amount}),
+        speech=f"{agent_id} {action_type}",
+        reaction={"intent": "announce_action"},
+        confidence=0.9,
     )
 
 

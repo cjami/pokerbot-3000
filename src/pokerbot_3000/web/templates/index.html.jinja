@@ -55,6 +55,12 @@
                   {% if seat == state.dealer_seat %}
                     <span class="dealer-button">D</span>
                   {% endif %}
+                  {% if seat == state.small_blind_seat %}
+                    <span class="blind-badge">SB</span>
+                  {% endif %}
+                  {% if seat == state.big_blind_seat %}
+                    <span class="blind-badge">BB</span>
+                  {% endif %}
                 </div>
                 <dl class="mt-4 grid gap-2 text-sm">
                   <div class="row-stat">
@@ -68,6 +74,10 @@
                   <div class="row-stat">
                     <dt>Committed</dt>
                     <dd>{{ player.committed_this_street }}</dd>
+                  </div>
+                  <div class="row-stat">
+                    <dt>Hand</dt>
+                    <dd>{{ player.committed_this_hand }}</dd>
                   </div>
                 </dl>
               </article>
@@ -104,7 +114,7 @@
             </div>
             <div class="row-stat">
               <dt>To call</dt>
-              <dd data-to-call>{{ state.current_bet_to_call }}</dd>
+              <dd data-to-call>{{ state.active_to_call }}</dd>
             </div>
             <div class="row-stat">
               <dt>Min raise</dt>

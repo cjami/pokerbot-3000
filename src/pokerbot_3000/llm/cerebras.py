@@ -23,7 +23,7 @@ from pokerbot_3000.ports.llm import AgentDecision, ImageFrame
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from pokerbot_3000.domain.models import GameEvent, PublicGameState
+    from pokerbot_3000.domain.models import GameEvent, PrivateAgentState, PublicGameState
 
 type JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 type JsonObject = dict[str, JsonValue]
@@ -193,7 +193,7 @@ class CerebrasLlmClient:
         self,
         agent_id: str,
         public_state: PublicGameState,
-        private_state: PrivateCardObservation,
+        private_state: PrivateAgentState,
     ) -> AgentDecision:
         """Choose an agent action from public and private state."""
         payload = await self._chat_json(

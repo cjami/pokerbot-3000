@@ -1,4 +1,4 @@
-"""In-memory orchestrator skeleton for the hackathon demo."""
+"""In-memory poker orchestrator for the live demo."""
 
 from __future__ import annotations
 
@@ -34,23 +34,26 @@ from pokerbot_3000.domain.models import (
     PublicTableObservation,
     ShowdownSnapshot,
     ShowdownStatus,
+    SidePotSnapshot,
     Street,
 )
-from pokerbot_3000.orchestrator.agents import AgentProfile, StubPokerAgent
+from pokerbot_3000.orchestrator.agents import AgentProfile
 
 if TYPE_CHECKING:
     from pokerbot_3000.domain.cards import Card
+    from pokerbot_3000.ports.llm import AgentDecision
 
 BOARD_COMPLETE_CARD_COUNT = 5
 HOLE_CARD_COUNT = 2
+MIN_PLAYERS_FOR_HAND = 2
 MIN_NON_ALL_IN_PLAYERS_FOR_BETTING = 2
 
 
 @dataclass(frozen=True, slots=True)
 class DemoDefaults:
-    """Configurable demo values for the initial skeleton state."""
+    """Configurable demo values for the initial state."""
 
-    hand_id: str = "hand_001"
+    hand_id_prefix: str = "hand"
     starting_stack: int = 2_000
     small_blind: int = 10
     big_blind: int = 20
@@ -66,12 +69,11 @@ class InMemoryOrchestrator:
     _turn_order = (1, 3, 2)
 
     def __init__(self, defaults: DemoDefaults | None = None) -> None:
-        """Initialize the orchestrator with a three-player demo hand."""
+        """Initialize the orchestrator with a three-player demo table."""
         self._defaults = defaults or DemoDefaults()
         self._state = self._build_initial_state(self._defaults)
         self._private_states = self._build_private_states()
         self._client_statuses = self._build_client_statuses()
-        self._agent = StubPokerAgent()
         self._agent_profiles = self._build_agent_profiles()
         self._events: list[GameEvent] = []
         self._last_valid_board_candidate: tuple[tuple[str, str], ...] | None = None
@@ -128,12 +130,28 @@ class InMemoryOrchestrator:
                 return event.model_copy(deep=True)
         return None
 
+    def events_since(self, index: int) -> list[GameEvent]:
+        """Return events appended after a known index."""
+        return [event.model_copy(deep=True) for event in self._events[index:]]
+
     def needs_public_board_observation(self) -> bool:
         """Return whether the engine is currently blocked on public board recognition."""
         return self._is_waiting_for(PendingInputType.PUBLIC_BOARD_CARDS)
 
+    def pending_agent_action(self) -> str | None:
+        """Return the agent id whose Gemma decision is needed, if any."""
+        waiting_for = self._state.waiting_for
+        if waiting_for is None or waiting_for.type != PendingInputType.AGENT_ACTION:
+            return None
+        return waiting_for.agent_id
+
+    def private_state_for_agent(self, agent_id: str) -> PrivateAgentState:
+        """Return one agent private state for LLM decision input."""
+        self._ensure_known_agent(agent_id)
+        return self._private_states[agent_id].model_copy(deep=True)
+
     def start_game(self) -> OperatorControlResult:
-        """Start a fresh demo hand and run until the first external input."""
+        """Start a fresh demo session and begin the first hand."""
         event_start = len(self._events)
         if self._state.automation_status != "stopped":
             return OperatorControlResult(
@@ -145,22 +163,17 @@ class InMemoryOrchestrator:
 
         self._state = self._build_initial_state(self._defaults)
         self._private_states = self._build_private_states()
-        self._last_valid_board_candidate = None
-        self._acted_this_street = set()
-        self._last_aggressor_by_street = {}
-        self._showdown_reveals = {}
-        self._all_in_runout = False
+        self._reset_transient_hand_state()
         self._append_event(
             EventType.GAME_STARTED,
             source="dashboard",
-            summary="Operator started a fresh demo hand.",
-            payload={"hand_id": self._state.hand_id},
+            summary="Operator started a fresh poker session.",
+            payload={"hand_number": self._state.hand_number},
         )
-        self._set_active_player(self._defaults.active_player_seat)
-        self._request_public_board_cards(3)
+        self._begin_hand(self._defaults.dealer_seat)
         return OperatorControlResult(
             accepted=True,
-            reason="Game started; waiting for the flop.",
+            reason="Game started; preflop action is open.",
             events=self.events_since(event_start),
             state=self.public_state(),
         )
@@ -179,15 +192,10 @@ class InMemoryOrchestrator:
         self._state.automation_status = "stopped"
         self._state.waiting_for = None
         self._state.legal_actions = []
-        self._state.board_recognition = BoardRecognitionSnapshot(
-            confidence_threshold=self._defaults.board_confidence_threshold,
-            required_stable_samples=self._defaults.required_stable_board_samples,
-        )
+        self._state.active_to_call = 0
+        self._state.board_recognition = self._empty_board_recognition()
         self._state.showdown = ShowdownSnapshot()
-        self._last_valid_board_candidate = None
-        self._acted_this_street = set()
-        self._showdown_reveals = {}
-        self._all_in_runout = False
+        self._reset_transient_hand_state(clear_private=False)
         self._append_event(
             EventType.GAME_STOPPED,
             source="dashboard",
@@ -202,22 +210,12 @@ class InMemoryOrchestrator:
         )
 
     def submit_human_action(self, request: HumanActionInput) -> ExternalInputResult:
-        """Consume human input and continue automated orchestration until blocked again."""
+        """Consume human input and continue orchestration until blocked again."""
         event_start = len(self._events)
         if self._state.automation_status == "stopped":
-            return ExternalInputResult(
-                accepted=False,
-                reason="Game is stopped. Start the game before submitting human input.",
-                events=[],
-                state=self.public_state(),
-            )
+            return self._external_rejection("Game is stopped. Start the game before submitting human input.")
         if not self._is_waiting_for(PendingInputType.HUMAN_ACTION, seat=request.seat):
-            return ExternalInputResult(
-                accepted=False,
-                reason="The engine is not waiting for a human action from that seat.",
-                events=[],
-                state=self.public_state(),
-            )
+            return self._external_rejection("The engine is not waiting for a human action from that seat.")
 
         if request.source == "voice":
             self._append_event(
@@ -231,13 +229,95 @@ class InMemoryOrchestrator:
                     "confidence": request.confidence,
                 },
             )
-        self._commit_action(request.seat, request.action, source=request.source)
+        try:
+            self._commit_action(request.seat, request.action, source=request.source)
+        except ValueError as exc:
+            return ExternalInputResult(
+                accepted=False,
+                reason=str(exc),
+                events=self.events_since(event_start),
+                state=self.public_state(),
+            )
         self._advance_after_action()
         return ExternalInputResult(
             accepted=True,
             reason="Human action consumed; engine advanced until the next external input.",
             events=self.events_since(event_start),
             state=self.public_state(),
+        )
+
+    def submit_agent_decision(self, decision: AgentDecision) -> ExternalInputResult:
+        """Consume one Gemma agent decision and continue orchestration."""
+        event_start = len(self._events)
+        agent_id = self.pending_agent_action()
+        if agent_id is None:
+            return self._external_rejection("The engine is not waiting for an agent decision.")
+        if decision.agent_id != agent_id:
+            return self._external_rejection(f"The engine is waiting for {agent_id}, not {decision.agent_id}.")
+
+        profile = self._agent_profiles[agent_id]
+        try:
+            self._commit_action(profile.seat, decision.action, source=f"agent:{agent_id}")
+        except ValueError as exc:
+            self.record_agent_decision_failed(agent_id, str(exc))
+            return ExternalInputResult(
+                accepted=False,
+                reason=str(exc),
+                events=self.events_since(event_start),
+                state=self.public_state(),
+            )
+
+        self._append_event(
+            EventType.AGENT_DECISION,
+            source=f"agent:{agent_id}",
+            summary=f"{profile.display_name} chose {decision.action.type}.",
+            payload={
+                "agent_id": agent_id,
+                "action": decision.action.model_dump(mode="json"),
+                "confidence": decision.confidence,
+                "known_private_card_count": len(self._private_states[agent_id].hole_cards),
+            },
+        )
+        self._append_event(
+            EventType.PRESENTATION_COMMAND,
+            source="orchestrator",
+            summary=f"Queued {profile.display_name} presentation output.",
+            payload={
+                "target_client": profile.client_id,
+                "intent": _reaction_intent(decision.reaction),
+                "speech": decision.speech or _default_agent_speech(profile.display_name, decision.action),
+                "emotion": _emotion_for_action(decision.action.type),
+                "gesture": _gesture_for_action(decision.action.type),
+                "priority": "normal",
+            },
+        )
+        self._advance_after_action()
+        return ExternalInputResult(
+            accepted=True,
+            reason=f"{profile.display_name} agent decision consumed.",
+            events=self.events_since(event_start),
+            state=self.public_state(),
+        )
+
+    def record_agent_decision_failed(self, agent_id: str, message: str) -> GameEvent:
+        """Record a failed Gemma decision while keeping the agent turn paused."""
+        self._ensure_known_agent(agent_id)
+        profile = self._agent_profiles[agent_id]
+        self._state.waiting_for = PendingInput(
+            type=PendingInputType.AGENT_ACTION,
+            seat=profile.seat,
+            agent_id=agent_id,
+            client_id=profile.client_id,
+            reason=f"Waiting for a valid Gemma decision from {profile.display_name}: {message}",
+        )
+        self._state.automation_status = "waiting_for_external_input"
+        self._state.legal_actions = self._legal_actions()
+        self._refresh_active_to_call()
+        return self._append_event(
+            EventType.AGENT_DECISION_FAILED,
+            source=f"agent:{agent_id}",
+            summary=f"Gemma decision failed for {profile.display_name}: {message}",
+            payload={"agent_id": agent_id, "error": message},
         )
 
     def record_public_observation(self, observation: PublicTableObservation) -> ObservationReceipt:
@@ -264,11 +344,7 @@ class InMemoryOrchestrator:
         """Record a public board-recognition error without stopping the app."""
         if self.needs_public_board_observation():
             self._state.board_recognition = self._state.board_recognition.model_copy(
-                update={
-                    "status": BoardRecognitionStatus.ERROR,
-                    "last_error": message,
-                    "stable_sample_count": 0,
-                },
+                update={"status": BoardRecognitionStatus.ERROR, "last_error": message, "stable_sample_count": 0},
             )
             self._last_valid_board_candidate = None
         return self._append_event(
@@ -278,38 +354,23 @@ class InMemoryOrchestrator:
             payload={"error": message},
         )
 
-    def record_client_private_cards(
-        self,
-        agent_id: str,
-        observation: PrivateCardObservation,
-    ) -> ExternalInputResult:
-        """Consume thin-client private-card input and run the agent turn internally."""
+    def record_client_private_cards(self, agent_id: str, observation: PrivateCardObservation) -> ExternalInputResult:
+        """Consume thin-client private-card input and pause for that agent decision."""
         self._ensure_known_agent(agent_id)
         if self._state.automation_status == "stopped":
-            return ExternalInputResult(
-                accepted=False,
-                reason="Game is stopped. Start the game before submitting private cards.",
-                events=[],
-                state=self.public_state(),
-            )
+            return self._external_rejection("Game is stopped. Start the game before submitting private cards.")
         if observation.agent_id != agent_id:
             msg = f"Path agent_id {agent_id!r} does not match payload agent_id {observation.agent_id!r}."
             raise ValueError(msg)
         if not self._is_waiting_for(PendingInputType.PRIVATE_CARDS, agent_id=agent_id):
-            return ExternalInputResult(
-                accepted=False,
-                reason=f"The engine is not waiting for private cards from {agent_id}.",
-                events=[],
-                state=self.public_state(),
-            )
+            return self._external_rejection(f"The engine is not waiting for private cards from {agent_id}.")
 
         event_start = len(self._events)
         self._store_private_cards(agent_id, observation)
-        self._run_agent_turn(agent_id)
-        self._advance_after_action()
+        self._pause_for_agent_action(agent_id)
         return ExternalInputResult(
             accepted=True,
-            reason=f"{agent_id} private cards consumed; internal agent acted.",
+            reason=f"{agent_id} private cards consumed; waiting for Gemma decision.",
             events=self.events_since(event_start),
             state=self.public_state(),
         )
@@ -317,19 +378,9 @@ class InMemoryOrchestrator:
     def record_revealed_cards(self, seat: int, cards: list[Card], *, source: str) -> ExternalInputResult:
         """Consume one showdown reveal crop and continue runout or resolution."""
         if self._state.automation_status == "stopped":
-            return ExternalInputResult(
-                accepted=False,
-                reason="Game is stopped. Start the game before submitting revealed cards.",
-                events=[],
-                state=self.public_state(),
-            )
+            return self._external_rejection("Game is stopped. Start the game before submitting revealed cards.")
         if not self._is_waiting_for(PendingInputType.REVEALED_CARDS, seat=seat):
-            return ExternalInputResult(
-                accepted=False,
-                reason=f"The engine is not waiting for revealed cards from seat {seat}.",
-                events=[],
-                state=self.public_state(),
-            )
+            return self._external_rejection(f"The engine is not waiting for revealed cards from seat {seat}.")
 
         event_start = len(self._events)
         error = self._revealed_cards_validation_error(seat, cards)
@@ -362,11 +413,7 @@ class InMemoryOrchestrator:
             EventType.REVEALED_CARD_OBSERVATION,
             source=source,
             summary=f"Read revealed cards for S{seat}.",
-            payload={
-                "seat": seat,
-                "hole_card_count": len(cards),
-                "source": source,
-            },
+            payload={"seat": seat, "hole_card_count": len(cards), "source": source},
         )
         self._continue_after_reveal()
         return ExternalInputResult(
@@ -376,17 +423,96 @@ class InMemoryOrchestrator:
             state=self.public_state(),
         )
 
-    def events_since(self, index: int) -> list[GameEvent]:
-        """Return events appended after a known index."""
-        return [event.model_copy(deep=True) for event in self._events[index:]]
+    def _begin_hand(self, dealer_seat: int) -> None:
+        self._reset_transient_hand_state()
+        active_seats = self._seats_with_chips()
+        dealer = dealer_seat if dealer_seat in active_seats else active_seats[0]
+        small_blind_seat, big_blind_seat = self._blind_seats_for(dealer, active_seats)
+
+        self._state.hand_id = _hand_id(self._defaults.hand_id_prefix, self._state.hand_number)
+        self._state.street = Street.PREFLOP
+        self._state.dealer_seat = dealer
+        self._state.small_blind_seat = small_blind_seat
+        self._state.big_blind_seat = big_blind_seat
+        self._state.small_blind = self._defaults.small_blind
+        self._state.big_blind = self._defaults.big_blind
+        self._state.board = []
+        self._state.board_source = "manual"
+        self._state.board_confidence = 0.0
+        self._state.pot = 0
+        self._state.current_bet_to_call = 0
+        self._state.active_to_call = 0
+        self._state.min_raise_to = self._defaults.big_blind
+        self._state.side_pots = []
+        self._state.waiting_for = None
+        self._state.legal_actions = []
+        self._state.board_recognition = self._empty_board_recognition()
+        self._state.showdown = ShowdownSnapshot()
+        self._private_states = self._build_private_states()
+        for seat, player in self._state.players.items():
+            player.committed_this_street = 0
+            player.committed_this_hand = 0
+            player.status = PlayerStatus.IN_HAND if seat in active_seats else PlayerStatus.OUT
+
+        self._append_event(
+            EventType.HAND_STARTED,
+            source="orchestrator",
+            summary=f"Hand {self._state.hand_number} started with S{dealer} as dealer.",
+            payload={
+                "hand_id": self._state.hand_id,
+                "hand_number": self._state.hand_number,
+                "dealer_seat": dealer,
+                "small_blind_seat": small_blind_seat,
+                "big_blind_seat": big_blind_seat,
+            },
+        )
+        self._post_blind(small_blind_seat, self._defaults.small_blind, "small blind")
+        self._post_blind(big_blind_seat, self._defaults.big_blind, "big blind")
+        self._state.current_bet_to_call = max(
+            self._state.players[small_blind_seat].committed_this_street,
+            self._state.players[big_blind_seat].committed_this_street,
+        )
+        self._state.min_raise_to = self._state.current_bet_to_call + self._defaults.big_blind
+        first_seat = self._next_action_seat_after(big_blind_seat)
+        if first_seat is None:
+            self._begin_showdown()
+            return
+        self._queue_orchestrator_speech(_hand_setup_speech(self._state, first_seat), intent="hand_setup")
+        self._route_action_to(first_seat)
+
+    def _reset_transient_hand_state(self, *, clear_private: bool = True) -> None:
+        self._last_valid_board_candidate = None
+        self._acted_this_street = set()
+        self._last_aggressor_by_street = {}
+        self._showdown_reveals = {}
+        self._all_in_runout = False
+        if clear_private:
+            self._private_states = self._build_private_states()
+
+    def _post_blind(self, seat: int, amount: int, label: str) -> None:
+        player = self._state.players[seat]
+        posted = min(player.stack, amount)
+        player.stack -= posted
+        player.committed_this_street += posted
+        player.committed_this_hand += posted
+        self._state.pot += posted
+        if player.stack == 0:
+            player.status = PlayerStatus.ALL_IN
+        self._refresh_side_pots()
+        self._append_event(
+            EventType.BLIND_POSTED,
+            source="orchestrator",
+            summary=f"S{seat} posted {posted} chips for the {label}.",
+            payload={"seat": seat, "amount": posted, "blind": label, "pot": self._state.pot},
+        )
 
     def _advance_after_action(self) -> None:
         if self._award_if_uncontested():
             return
-        if self._should_enter_all_in_runout():
-            self._begin_all_in_runout()
-            return
         if self._is_betting_round_complete():
+            if self._should_enter_all_in_runout():
+                self._begin_all_in_runout()
+                return
             self._finish_betting_round()
             return
         self._continue_to_next_action()
@@ -396,20 +522,23 @@ class InMemoryOrchestrator:
         if next_seat is None:
             self._finish_betting_round()
             return
-        self._set_active_player(next_seat)
-        agent_id = self._agent_id_for_seat(next_seat)
+        self._route_action_to(next_seat)
+
+    def _route_action_to(self, seat: int) -> None:
+        self._set_active_player(seat)
+        agent_id = self._agent_id_for_seat(seat)
         if agent_id is None:
-            self._pause_for_human_action(next_seat)
+            self._pause_for_human_action(seat)
             return
         if self._private_states[agent_id].hole_cards:
-            self._run_agent_turn(agent_id)
-            self._advance_after_action()
+            self._pause_for_agent_action(agent_id)
             return
         self._pause_for_private_cards(agent_id)
 
     def _finish_betting_round(self) -> None:
         if len(self._state.board) < BOARD_COMPLETE_CARD_COUNT:
-            self._request_public_board_cards(len(self._state.board) + 1)
+            expected_count = 3 if len(self._state.board) == 0 else len(self._state.board) + 1
+            self._request_public_board_cards(expected_count)
             return
         self._begin_showdown()
 
@@ -439,76 +568,45 @@ class InMemoryOrchestrator:
             return
         if len(self._state.board) < BOARD_COMPLETE_CARD_COUNT:
             self._state.showdown = self._state.showdown.model_copy(update={"status": ShowdownStatus.RUNNING_OUT})
-            self._request_public_board_cards(len(self._state.board) + 1)
+            expected_count = 3 if len(self._state.board) == 0 else len(self._state.board) + 1
+            self._request_public_board_cards(expected_count)
             return
         self._resolve_showdown()
-
-    def _run_agent_turn(self, agent_id: str) -> None:
-        profile = self._agent_profiles[agent_id]
-        private_state = self._private_states[agent_id]
-        turn = self._agent.decide(profile, self.public_state(), private_state)
-        self._append_event(
-            EventType.AGENT_DECISION,
-            source=f"agent:{agent_id}",
-            summary=f"{profile.display_name} chose {turn.action.type}.",
-            payload={
-                "agent_id": agent_id,
-                "action": turn.action.model_dump(mode="json"),
-                "known_private_card_count": len(private_state.hole_cards),
-            },
-        )
-        self._commit_action(profile.seat, turn.action, source=f"agent:{agent_id}")
-        self._append_event(
-            EventType.PRESENTATION_COMMAND,
-            source="orchestrator",
-            summary=f"Queued {profile.display_name} presentation output.",
-            payload={
-                "target_client": profile.client_id,
-                "intent": turn.reaction,
-                "speech": turn.speech,
-                "emotion": turn.emotion,
-                "gesture": turn.gesture,
-                "priority": "normal",
-            },
-        )
 
     def _commit_action(self, seat: int, action: PokerAction, *, source: str) -> None:
         if seat != self._state.active_player_seat:
             msg = f"Seat {seat} is not the active player."
             raise ValueError(msg)
+        self._validate_action(seat, action)
 
         player = self._state.players[seat]
-        amount = self._chip_delta_for(action, player)
-        if amount > player.stack:
-            msg = f"Seat {seat} does not have enough chips for {amount}."
-            raise ValueError(msg)
-
+        before_commitment = player.committed_this_street
+        amount = self._chip_delta_for(seat, action)
         player.stack -= amount
         player.committed_this_street += amount
+        player.committed_this_hand += amount
         self._state.pot += amount
-        self._acted_this_street.add(seat)
-        is_aggressive = False
-        if action.type in {ActionType.BET, ActionType.RAISE_TO}:
-            self._state.current_bet_to_call = action.amount or 0
-            self._state.min_raise_to = max(
-                self._state.current_bet_to_call + self._defaults.big_blind,
-                self._defaults.big_blind,
-            )
-            is_aggressive = True
+
         if action.type == ActionType.FOLD:
             player.status = PlayerStatus.FOLDED
-        elif action.type == ActionType.ALL_IN:
-            player.status = PlayerStatus.ALL_IN
-            if amount > self._state.current_bet_to_call:
-                self._state.current_bet_to_call = amount
-                self._state.min_raise_to = max(amount + self._defaults.big_blind, self._defaults.big_blind)
-                is_aggressive = True
         elif player.stack == 0:
             player.status = PlayerStatus.ALL_IN
-        if is_aggressive:
+        elif player.status == PlayerStatus.ACTIVE:
+            player.status = PlayerStatus.IN_HAND
+
+        aggressive = False
+        if player.committed_this_street > self._state.current_bet_to_call:
+            self._state.current_bet_to_call = player.committed_this_street
+            self._state.min_raise_to = self._state.current_bet_to_call + self._defaults.big_blind
+            aggressive = True
+        if aggressive:
             self._last_aggressor_by_street[self._state.street] = seat
             self._acted_this_street = {seat}
+        else:
+            self._acted_this_street.add(seat)
 
+        self._refresh_active_to_call()
+        self._refresh_side_pots()
         amount_text = f" {amount}" if amount else ""
         self._append_event(
             EventType.ACTION_COMMITTED,
@@ -517,10 +615,59 @@ class InMemoryOrchestrator:
             payload={
                 "seat": seat,
                 "action": action.model_dump(mode="json"),
+                "delta": amount,
+                "previous_commitment": before_commitment,
+                "street_commitment": player.committed_this_street,
                 "pot": self._state.pot,
                 "stack": player.stack,
             },
         )
+
+    def _validate_action(self, seat: int, action: PokerAction) -> None:  # noqa: C901
+        player = self._state.players[seat]
+        to_call = self._to_call_for(seat)
+        if action.type not in self._legal_actions():
+            msg = f"{action.type} is not legal for seat {seat}."
+            raise ValueError(msg)
+        if action.type == ActionType.CHECK and to_call:
+            msg = f"Seat {seat} must call {to_call}, raise, or fold."
+            raise ValueError(msg)
+        if action.type == ActionType.CALL and to_call <= 0:
+            msg = f"Seat {seat} has nothing to call."
+            raise ValueError(msg)
+        if action.type == ActionType.BET:
+            target = action.amount or 0
+            if self._state.current_bet_to_call:
+                msg = "Cannot bet after a bet is already open."
+                raise ValueError(msg)
+            if target < self._defaults.big_blind and target < player.committed_this_street + player.stack:
+                msg = f"Bet must be at least {self._defaults.big_blind} unless all-in."
+                raise ValueError(msg)
+            if target > player.committed_this_street + player.stack:
+                msg = f"Seat {seat} does not have enough chips to bet {target}."
+                raise ValueError(msg)
+        if action.type == ActionType.RAISE_TO:
+            target = action.amount or 0
+            max_target = player.committed_this_street + player.stack
+            if target <= self._state.current_bet_to_call:
+                msg = f"Raise must exceed {self._state.current_bet_to_call}."
+                raise ValueError(msg)
+            if target < self._state.min_raise_to and target < max_target:
+                msg = f"Raise must be to at least {self._state.min_raise_to} unless all-in."
+                raise ValueError(msg)
+            if target > max_target:
+                msg = f"Seat {seat} does not have enough chips to raise to {target}."
+                raise ValueError(msg)
+
+    def _chip_delta_for(self, seat: int, action: PokerAction) -> int:
+        player = self._state.players[seat]
+        if action.type in {ActionType.BET, ActionType.RAISE_TO}:
+            return max(0, (action.amount or 0) - player.committed_this_street)
+        if action.type == ActionType.CALL:
+            return min(self._to_call_for(seat), player.stack)
+        if action.type == ActionType.ALL_IN:
+            return player.stack
+        return 0
 
     def _store_private_cards(self, agent_id: str, observation: PrivateCardObservation) -> None:
         self._private_states[agent_id] = PrivateAgentState(
@@ -550,7 +697,6 @@ class InMemoryOrchestrator:
         if expected_count is None:
             return
 
-        cards = observation.board_cards
         validation_error = self._public_board_validation_error(observation, expected_count)
         if validation_error is not None:
             self._last_valid_board_candidate = None
@@ -564,7 +710,7 @@ class InMemoryOrchestrator:
             )
             return
 
-        candidate = _board_key(cards)
+        candidate = _board_key(observation.board_cards)
         stable_count = 1
         if candidate == self._last_valid_board_candidate:
             stable_count = self._state.board_recognition.stable_sample_count + 1
@@ -617,31 +763,12 @@ class InMemoryOrchestrator:
             if len(cards) < BOARD_COMPLETE_CARD_COUNT:
                 self._request_public_board_cards(len(cards) + 1)
                 return
-            self._state.board_recognition = self._state.board_recognition.model_copy(
-                update={
-                    "status": BoardRecognitionStatus.COMPLETE,
-                    "expected_card_count": None,
-                    "stable_sample_count": 0,
-                    "last_error": None,
-                    "instruction": "Board recognition complete.",
-                },
-            )
+            self._state.board_recognition = self._complete_board_recognition()
             self._resolve_showdown()
             return
 
         if len(cards) == BOARD_COMPLETE_CARD_COUNT:
-            self._state.board_recognition = self._state.board_recognition.model_copy(
-                update={
-                    "status": BoardRecognitionStatus.COMPLETE,
-                    "expected_card_count": None,
-                    "stable_sample_count": 0,
-                    "last_error": None,
-                    "instruction": "Board recognition complete.",
-                },
-            )
-            self._begin_betting_round()
-            return
-
+            self._state.board_recognition = self._complete_board_recognition()
         self._begin_betting_round()
 
     def _begin_betting_round(self) -> None:
@@ -650,28 +777,20 @@ class InMemoryOrchestrator:
             if player.status == PlayerStatus.ACTIVE:
                 player.status = PlayerStatus.IN_HAND
         self._state.current_bet_to_call = 0
+        self._state.active_to_call = 0
         self._state.min_raise_to = self._defaults.big_blind
         self._acted_this_street = set()
         first_seat = self._first_live_after(self._state.dealer_seat)
         if first_seat is None:
             self._award_if_uncontested()
             return
-        self._set_active_player(first_seat)
         self._append_event(
             EventType.ENGINE_PAUSED,
             source="orchestrator",
             summary=f"Betting opened on the {self._state.street}.",
             payload={"street": self._state.street},
         )
-        agent_id = self._agent_id_for_seat(first_seat)
-        if agent_id is None:
-            self._pause_for_human_action(first_seat)
-            return
-        if self._private_states[agent_id].hole_cards:
-            self._run_agent_turn(agent_id)
-            self._advance_after_action()
-            return
-        self._pause_for_private_cards(agent_id)
+        self._route_action_to(first_seat)
 
     def _request_public_board_cards(self, expected_count: int) -> None:
         stage_name = _stage_name_for_count(expected_count)
@@ -681,6 +800,7 @@ class InMemoryOrchestrator:
         )
         self._state.automation_status = "waiting_for_external_input"
         self._state.legal_actions = []
+        self._state.active_to_call = 0
         self._state.board_recognition = BoardRecognitionSnapshot(
             status=BoardRecognitionStatus.WAITING,
             expected_card_count=expected_count,
@@ -695,7 +815,10 @@ class InMemoryOrchestrator:
             summary=f"Engine paused for {stage_name} board recognition.",
             payload=self._state.waiting_for.model_dump(mode="json"),
         )
-        self._queue_orchestrator_speech(_speech_for_count(expected_count), intent=f"request_{stage_name}")
+        self._queue_orchestrator_speech(
+            _speech_for_count(expected_count, self._state.pot),
+            intent=f"request_{stage_name}",
+        )
 
     def _queue_orchestrator_speech(self, speech: str, *, intent: str) -> None:
         self._append_event(
@@ -719,6 +842,7 @@ class InMemoryOrchestrator:
         )
         self._state.automation_status = "waiting_for_external_input"
         self._state.legal_actions = self._legal_actions()
+        self._refresh_active_to_call()
         self._append_event(
             EventType.ENGINE_PAUSED,
             source="orchestrator",
@@ -736,11 +860,31 @@ class InMemoryOrchestrator:
             reason=f"Waiting for {profile.display_name}'s thin client to capture private cards.",
         )
         self._state.automation_status = "waiting_for_external_input"
-        self._state.legal_actions = self._legal_actions()
+        self._state.legal_actions = []
+        self._refresh_active_to_call()
         self._append_event(
             EventType.ENGINE_PAUSED,
             source="orchestrator",
             summary=f"Engine paused for {profile.display_name} private-card input.",
+            payload=self._state.waiting_for.model_dump(mode="json"),
+        )
+
+    def _pause_for_agent_action(self, agent_id: str) -> None:
+        profile = self._agent_profiles[agent_id]
+        self._state.waiting_for = PendingInput(
+            type=PendingInputType.AGENT_ACTION,
+            seat=profile.seat,
+            agent_id=agent_id,
+            client_id=profile.client_id,
+            reason=f"Waiting for Gemma to choose {profile.display_name}'s action.",
+        )
+        self._state.automation_status = "waiting_for_external_input"
+        self._state.legal_actions = self._legal_actions()
+        self._refresh_active_to_call()
+        self._append_event(
+            EventType.ENGINE_PAUSED,
+            source="orchestrator",
+            summary=f"Engine paused for {profile.display_name} Gemma decision.",
             payload=self._state.waiting_for.model_dump(mode="json"),
         )
 
@@ -759,6 +903,7 @@ class InMemoryOrchestrator:
         )
         self._state.automation_status = "waiting_for_external_input"
         self._state.legal_actions = []
+        self._state.active_to_call = 0
         self._state.showdown = self._state.showdown.model_copy(
             update={
                 "status": ShowdownStatus.REVEALING,
@@ -771,6 +916,10 @@ class InMemoryOrchestrator:
             source="orchestrator",
             summary=f"Engine paused for S{next_seat} revealed-card input.",
             payload=self._state.waiting_for.model_dump(mode="json"),
+        )
+        self._queue_orchestrator_speech(
+            f"The pot is {self._state.pot}. {_player_name(self._state, next_seat)}, please reveal your cards.",
+            intent="request_reveal",
         )
 
     def _append_event(
@@ -786,14 +935,8 @@ class InMemoryOrchestrator:
         self._state.last_actions = [event.summary for event in self._events[-5:]]
         return event.model_copy(deep=True)
 
-    def _chip_delta_for(self, action: PokerAction, player: PlayerState) -> int:
-        if action.type in {ActionType.BET, ActionType.RAISE_TO}:
-            return action.amount or 0
-        if action.type == ActionType.CALL:
-            return action.amount if action.amount is not None else self._state.current_bet_to_call
-        if action.type == ActionType.ALL_IN:
-            return player.stack
-        return 0
+    def _external_rejection(self, reason: str) -> ExternalInputResult:
+        return ExternalInputResult(accepted=False, reason=reason, events=[], state=self.public_state())
 
     def _is_waiting_for(
         self,
@@ -817,14 +960,29 @@ class InMemoryOrchestrator:
             if player_seat == seat and player.status == PlayerStatus.IN_HAND:
                 player.status = PlayerStatus.ACTIVE
         self._state.legal_actions = self._legal_actions()
+        self._refresh_active_to_call()
 
     def _legal_actions(self) -> list[ActionType]:
         player = self._state.players[self._state.active_player_seat]
-        if player.status == PlayerStatus.ALL_IN:
+        if player.status == PlayerStatus.ALL_IN or player.stack == 0:
             return []
-        if self._state.current_bet_to_call:
+        if self._to_call_for(self._state.active_player_seat):
             return [ActionType.FOLD, ActionType.CALL, ActionType.RAISE_TO, ActionType.ALL_IN]
         return [ActionType.CHECK, ActionType.BET, ActionType.ALL_IN]
+
+    def _to_call_for(self, seat: int) -> int:
+        return max(0, self._state.current_bet_to_call - self._state.players[seat].committed_this_street)
+
+    def _refresh_active_to_call(self) -> None:
+        self._state.active_to_call = self._to_call_for(self._state.active_player_seat)
+
+    def _refresh_side_pots(self) -> None:
+        contributions = {
+            seat: player.committed_this_hand
+            for seat, player in self._state.players.items()
+            if player.committed_this_hand > 0
+        }
+        self._state.side_pots = _side_pots_for(contributions, self._eligible_showdown_seats())
 
     def _live_seats(self) -> list[int]:
         return [
@@ -832,6 +990,16 @@ class InMemoryOrchestrator:
             for seat, player in self._state.players.items()
             if player.status not in {PlayerStatus.FOLDED, PlayerStatus.OUT}
         ]
+
+    def _seats_with_chips(self) -> list[int]:
+        return [seat for seat in self._turn_order if self._state.players[seat].stack > 0]
+
+    def _eligible_showdown_seats(self) -> set[int]:
+        return {
+            seat
+            for seat, player in self._state.players.items()
+            if player.status not in {PlayerStatus.FOLDED, PlayerStatus.OUT}
+        }
 
     def _actionable_seats(self) -> list[int]:
         return [
@@ -842,6 +1010,9 @@ class InMemoryOrchestrator:
 
     def _first_live_after(self, seat: int) -> int | None:
         return self._first_matching_after(seat, set(self._live_seats()))
+
+    def _next_live_after(self, seat: int) -> int | None:
+        return self._first_matching_after(seat, set(self._seats_with_chips()))
 
     def _next_action_seat_after(self, seat: int) -> int | None:
         return self._first_matching_after(seat, set(self._actionable_seats()))
@@ -855,6 +1026,15 @@ class InMemoryOrchestrator:
             if current in candidates:
                 return current
         return None
+
+    def _blind_seats_for(self, dealer: int, active_seats: list[int]) -> tuple[int, int]:
+        if len(active_seats) == MIN_PLAYERS_FOR_HAND:
+            small_blind = dealer
+            big_blind = next(seat for seat in active_seats if seat != dealer)
+            return small_blind, big_blind
+        small_blind = self._first_matching_after(dealer, set(active_seats)) or dealer
+        big_blind = self._first_matching_after(small_blind, set(active_seats)) or small_blind
+        return small_blind, big_blind
 
     def _is_betting_round_complete(self) -> bool:
         actionable = set(self._actionable_seats())
@@ -889,8 +1069,10 @@ class InMemoryOrchestrator:
         awarded = self._state.pot
         self._state.players[winner].stack += awarded
         self._state.pot = 0
+        self._state.side_pots = []
         self._state.waiting_for = None
         self._state.legal_actions = []
+        self._state.active_to_call = 0
         self._state.automation_status = "complete"
         self._state.showdown = ShowdownSnapshot(
             status=ShowdownStatus.COMPLETE,
@@ -904,6 +1086,7 @@ class InMemoryOrchestrator:
             summary=f"S{winner} won {awarded} chips uncontested.",
             payload={"winner_seats": [winner], "pot_awarded": awarded, "winning_hand": "Uncontested pot"},
         )
+        self._start_next_hand_if_possible()
         return True
 
     def _showdown_reveal_order(self) -> list[int]:
@@ -943,40 +1126,59 @@ class InMemoryOrchestrator:
             seat: eval7.evaluate([*_eval7_cards(self._state.board), *_eval7_cards(cards)])
             for seat, cards in self._showdown_reveals.items()
         }
-        best_score = max(scores.values())
-        winner_seats = sorted(seat for seat, score in scores.items() if score == best_score)
-        pot = self._state.pot
-        share, remainder = divmod(pot, len(winner_seats))
-        for index, seat in enumerate(winner_seats):
-            self._state.players[seat].stack += share + (1 if index < remainder else 0)
+        side_pots = self._state.side_pots or [SidePotSnapshot(amount=self._state.pot, eligible_seats=list(scores))]
+        winner_seats: set[int] = set()
+        pot_awarded = 0
+        best_overall = max(scores.values())
+        for pot in side_pots:
+            eligible = [seat for seat in pot.eligible_seats if seat in scores]
+            if not eligible or pot.amount == 0:
+                continue
+            best_score = max(scores[seat] for seat in eligible)
+            winners = sorted(seat for seat in eligible if scores[seat] == best_score)
+            winner_seats.update(winners)
+            share, remainder = divmod(pot.amount, len(winners))
+            for index, seat in enumerate(winners):
+                self._state.players[seat].stack += share + (1 if index < remainder else 0)
+            pot_awarded += pot.amount
+
         self._state.pot = 0
+        self._state.side_pots = []
         self._state.street = Street.SHOWDOWN
         self._state.waiting_for = None
         self._state.legal_actions = []
+        self._state.active_to_call = 0
         self._state.automation_status = "complete"
-        winning_hand = eval7.handtype(best_score)
+        winning_hand = eval7.handtype(best_overall)
         self._state.showdown = self._state.showdown.model_copy(
             update={
                 "status": ShowdownStatus.COMPLETE,
                 "current_reveal_seat": None,
-                "winner_seats": winner_seats,
+                "winner_seats": sorted(winner_seats),
                 "winning_hand": winning_hand,
-                "pot_awarded": pot,
+                "pot_awarded": pot_awarded,
                 "last_error": None,
                 "revealed_cards_by_seat": self._showdown_reveals,
             },
         )
-        winners = ", ".join(f"S{seat}" for seat in winner_seats)
+        winners_text = ", ".join(f"S{seat}" for seat in sorted(winner_seats))
         self._append_event(
             EventType.SHOWDOWN_RESOLVED,
             source="orchestrator",
-            summary=f"{winners} won {pot} chips with {winning_hand}.",
+            summary=f"{winners_text} won {pot_awarded} chips with {winning_hand}.",
             payload={
-                "winner_seats": winner_seats,
+                "winner_seats": sorted(winner_seats),
                 "winning_hand": winning_hand,
-                "pot_awarded": pot,
+                "pot_awarded": pot_awarded,
             },
         )
+        self._start_next_hand_if_possible()
+
+    def _start_next_hand_if_possible(self) -> None:
+        if len(self._seats_with_chips()) < MIN_PLAYERS_FOR_HAND:
+            return
+        self._state.hand_number += 1
+        self._begin_hand(self._next_live_after(self._state.dealer_seat) or self._state.dealer_seat)
 
     def _next_seat_after(self, seat: int) -> int:
         index = self._turn_order.index(seat)
@@ -992,6 +1194,23 @@ class InMemoryOrchestrator:
         if agent_id not in self._private_states:
             msg = f"Unknown private agent {agent_id!r}."
             raise ValueError(msg)
+
+    def _empty_board_recognition(self) -> BoardRecognitionSnapshot:
+        return BoardRecognitionSnapshot(
+            confidence_threshold=self._defaults.board_confidence_threshold,
+            required_stable_samples=self._defaults.required_stable_board_samples,
+        )
+
+    def _complete_board_recognition(self) -> BoardRecognitionSnapshot:
+        return self._state.board_recognition.model_copy(
+            update={
+                "status": BoardRecognitionStatus.COMPLETE,
+                "expected_card_count": None,
+                "stable_sample_count": 0,
+                "last_error": None,
+                "instruction": "Board recognition complete.",
+            },
+        )
 
     @staticmethod
     def _build_initial_state(defaults: DemoDefaults) -> PublicGameState:
@@ -1016,9 +1235,12 @@ class InMemoryOrchestrator:
             ),
         }
         return PublicGameState(
-            hand_id=defaults.hand_id,
+            hand_id=_hand_id(defaults.hand_id_prefix, 1),
+            hand_number=1,
             street=Street.PREFLOP,
             dealer_seat=defaults.dealer_seat,
+            small_blind=defaults.small_blind,
+            big_blind=defaults.big_blind,
             active_player_seat=defaults.active_player_seat,
             min_raise_to=defaults.big_blind,
             players=players,
@@ -1029,10 +1251,7 @@ class InMemoryOrchestrator:
                 confidence_threshold=defaults.board_confidence_threshold,
                 required_stable_samples=defaults.required_stable_board_samples,
             ),
-            uncertainties=[
-                "Rules engine is still a deterministic skeleton.",
-                "Gemma-backed agent decisions are not wired yet.",
-            ],
+            uncertainties=[],
         )
 
     @staticmethod
@@ -1092,6 +1311,10 @@ class InMemoryOrchestrator:
         }
 
 
+def _hand_id(prefix: str, hand_number: int) -> str:
+    return f"{prefix}_{hand_number:03d}"
+
+
 def _board_key(cards: list[Card]) -> tuple[tuple[str, str], ...]:
     return tuple((str(card.rank), str(card.suit)) for card in cards)
 
@@ -1113,37 +1336,82 @@ def _format_board(cards: list[Card]) -> str:
 
 
 def _street_for_board_count(card_count: int) -> Street:
-    streets = {
-        0: Street.PREFLOP,
-        3: Street.FLOP,
-        4: Street.TURN,
-        5: Street.RIVER,
-    }
-    return streets[card_count]
+    return {0: Street.PREFLOP, 3: Street.FLOP, 4: Street.TURN, 5: Street.RIVER}[card_count]
 
 
 def _stage_name_for_count(card_count: int) -> str:
-    stages = {
-        3: "flop",
-        4: "turn",
-        5: "river",
-    }
-    return stages[card_count]
+    return {3: "flop", 4: "turn", 5: "river"}[card_count]
 
 
 def _instruction_for_count(card_count: int) -> str:
-    instructions = {
-        3: "Lay out the flop.",
-        4: "Reveal the turn.",
-        5: "Reveal the river.",
-    }
-    return instructions[card_count]
+    return {3: "Lay out the flop.", 4: "Reveal the turn.", 5: "Reveal the river."}[card_count]
 
 
-def _speech_for_count(card_count: int) -> str:
+def _speech_for_count(card_count: int, pot: int) -> str:
     lines = {
-        3: "Please lay out the flop.",
-        4: "Great, reveal the turn.",
-        5: "Great, reveal the river.",
+        3: f"The pot is {pot}. Please lay out the flop.",
+        4: f"The pot is {pot}. Great, reveal the turn.",
+        5: f"The pot is {pot}. Great, reveal the river.",
     }
     return lines[card_count]
+
+
+def _hand_setup_speech(state: PublicGameState, first_seat: int) -> str:
+    dealer = _player_name(state, state.dealer_seat)
+    small_blind = _player_name(state, state.small_blind_seat or state.dealer_seat)
+    big_blind = _player_name(state, state.big_blind_seat or state.dealer_seat)
+    first = _player_name(state, first_seat)
+    return (
+        f"Move the dealer button to {dealer}. {small_blind} posts small blind {state.small_blind}. "
+        f"{big_blind} posts big blind {state.big_blind}. Deal two cards. Action is on {first}."
+    )
+
+
+def _player_name(state: PublicGameState, seat: int) -> str:
+    return state.players[seat].name
+
+
+def _side_pots_for(contributions: dict[int, int], eligible_seats: set[int]) -> list[SidePotSnapshot]:
+    pots: list[SidePotSnapshot] = []
+    previous = 0
+    for level in sorted(set(contributions.values())):
+        contributors = [seat for seat, amount in contributions.items() if amount >= level]
+        pot_amount = (level - previous) * len(contributors)
+        eligible = sorted(seat for seat in contributors if seat in eligible_seats)
+        if pot_amount > 0 and eligible:
+            pots.append(SidePotSnapshot(amount=pot_amount, eligible_seats=eligible))
+        previous = level
+    return pots
+
+
+def _reaction_intent(reaction: dict[str, object]) -> str:
+    intent = reaction.get("intent")
+    return intent if isinstance(intent, str) and intent else "announce_action"
+
+
+def _default_agent_speech(display_name: str, action: PokerAction) -> str:
+    if action.amount is None:
+        return f"{display_name} {action.type.replace('_', ' ')}."
+    return f"{display_name} {action.type.replace('_', ' ')} {action.amount}."
+
+
+def _emotion_for_action(action_type: ActionType) -> str:
+    return {
+        ActionType.CHECK: "calm",
+        ActionType.CALL: "calm",
+        ActionType.BET: "confident",
+        ActionType.RAISE_TO: "confident",
+        ActionType.ALL_IN: "celebrate",
+        ActionType.FOLD: "sad",
+    }.get(action_type, "confused")
+
+
+def _gesture_for_action(action_type: ActionType) -> str:
+    return {
+        ActionType.CHECK: "nod",
+        ActionType.CALL: "nod",
+        ActionType.BET: "lean_in",
+        ActionType.RAISE_TO: "lean_in",
+        ActionType.ALL_IN: "big_nod",
+        ActionType.FOLD: "look_down",
+    }.get(action_type, "tilt")
