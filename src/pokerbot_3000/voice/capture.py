@@ -103,6 +103,45 @@ class SoundDeviceAudioInput:
             raise VoiceRuntimeError(msg) from exc
 
 
+class BrowserAudioInput:
+    """Receive mono 16-bit PCM chunks submitted by the browser."""
+
+    def __init__(self, *, queue_size: int = 128, sample_rate: int = DEFAULT_SAMPLE_RATE) -> None:
+        """Create a browser-fed audio queue."""
+        self._queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=queue_size)
+        self._sample_rate = sample_rate
+        self._connection_count = 0
+
+    @property
+    def connected(self) -> bool:
+        """Return whether at least one browser is streaming microphone audio."""
+        return self._connection_count > 0
+
+    @property
+    def pending_chunk_count(self) -> int:
+        """Return the number of queued browser audio chunks."""
+        return self._queue.qsize()
+
+    def connect(self) -> None:
+        """Record a browser voice stream connection."""
+        self._connection_count += 1
+
+    def disconnect(self) -> None:
+        """Record a browser voice stream disconnect."""
+        self._connection_count = max(0, self._connection_count - 1)
+
+    async def submit_pcm(self, pcm: bytes) -> None:
+        """Submit one 16 kHz mono PCM chunk from the browser."""
+        if not pcm:
+            return
+        _put_nowait_drop_oldest(self._queue, pcm)
+
+    async def chunks(self) -> AsyncIterator[AudioChunk]:
+        """Yield browser-submitted audio chunks."""
+        while True:
+            yield AudioChunk(pcm=await self._queue.get(), sample_rate=self._sample_rate)
+
+
 class SileroVoiceActivityDetector:
     """Segment microphone chunks into speech phrases with Silero VAD."""
 

@@ -235,7 +235,21 @@
             <h2>Voice Input</h2>
             <span class="status-pill" data-voice-state>{{ voice_input.state }}</span>
           </div>
+          <form class="camera-controls" data-voice-form>
+            <label>
+              <span>Microphone</span>
+              <select data-voice-device>
+                <option value="">Default microphone</option>
+              </select>
+            </label>
+            <button class="control-button" type="submit" data-voice-toggle>Use</button>
+          </form>
+          <p class="camera-status" data-voice-browser-status>Microphone idle</p>
           <dl class="grid gap-2 text-sm">
+            <div class="row-stat">
+              <dt>Source</dt>
+              <dd data-voice-source>{{ voice_input.audio_source or "browser" }}</dd>
+            </div>
             <div class="row-stat">
               <dt>Transcript</dt>
               <dd data-voice-transcript>{{ voice_input.latest_transcript or "none" }}</dd>

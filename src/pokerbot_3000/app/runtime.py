@@ -14,13 +14,13 @@ from pokerbot_3000.domain.models import EventType, ExternalInputResult
 from pokerbot_3000.orchestrator import InMemoryOrchestrator
 from pokerbot_3000.perception import LazyGemmaPublicVisionSource, LazyGemmaRevealedCardsSource
 from pokerbot_3000.voice import (
+    BrowserAudioInput,
     DeterministicVoiceCommandParser,
     ElevenLabsClient,
     ElevenLabsClientError,
     ElevenLabsConfig,
     ParakeetSpeechTranscriber,
     SileroVoiceActivityDetector,
-    SoundDeviceAudioInput,
     VoiceActionAdapters,
     VoiceActionCoordinator,
     VoiceInputStatus,
@@ -204,6 +204,7 @@ class DashboardRuntime:
     board_processor: PublicBoardFrameProcessor
     revealed_cards_processor: RevealedCardsFrameProcessor
     voice_coordinator: VoiceActionCoordinatorType | None = None
+    browser_voice_input: BrowserAudioInput | None = None
     voice_client_factory: VoiceClientFactory = _default_voice_client_factory
     _voice_client: SpeechSynthesisClient | None = field(default=None, init=False)
     _audio_cache: dict[str, bytes] = field(default_factory=dict, init=False)
@@ -234,10 +235,11 @@ class DashboardRuntime:
             broadcaster=broadcaster,
             after_events=handle_events,
         )
+        browser_voice_input = BrowserAudioInput()
         voice_coordinator = VoiceActionCoordinator(
             orchestrator=orchestrator,
             adapters=VoiceActionAdapters(
-                audio_input=SoundDeviceAudioInput(),
+                audio_input=browser_voice_input,
                 vad=SileroVoiceActivityDetector(),
                 transcriber=ParakeetSpeechTranscriber(),
                 parser=DeterministicVoiceCommandParser(),
@@ -251,6 +253,7 @@ class DashboardRuntime:
             board_processor=board_processor,
             revealed_cards_processor=revealed_cards_processor,
             voice_coordinator=voice_coordinator,
+            browser_voice_input=browser_voice_input,
         )
         runtime_ref["runtime"] = runtime
         return runtime
@@ -297,7 +300,27 @@ class DashboardRuntime:
         """Return the public server-side voice worker status."""
         if self.voice_coordinator is None:
             return VoiceInputStatus(state="not_configured").model_dump()
-        return self.voice_coordinator.status.model_dump()
+        status = self.voice_coordinator.status.model_dump()
+        status["audio_source"] = "browser"
+        status["browser_connected"] = bool(self.browser_voice_input and self.browser_voice_input.connected)
+        return status
+
+    async def browser_voice_websocket_endpoint(self, websocket: WebSocket) -> None:
+        """Receive browser microphone PCM chunks for the voice worker."""
+        await websocket.accept()
+        if self.browser_voice_input is None:
+            await websocket.close(code=1011)
+            return
+        self.browser_voice_input.connect()
+        await self.broadcaster.publish_snapshot()
+        try:
+            while True:
+                await self.browser_voice_input.submit_pcm(await websocket.receive_bytes())
+        except WebSocketDisconnect:
+            return
+        finally:
+            self.browser_voice_input.disconnect()
+            await self.broadcaster.publish_snapshot()
 
     def latest_public_frame(self) -> ImageFrame | None:
         """Return the latest browser public-table frame sent to Gemma."""

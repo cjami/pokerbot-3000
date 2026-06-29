@@ -48,6 +48,10 @@ def create_app(runtime: DashboardRuntime | None = None) -> FastAPI:
     async def events_websocket(websocket: WebSocket) -> None:
         await app_runtime.broadcaster.websocket_endpoint(websocket)
 
+    @app.websocket("/ws/voice/human")
+    async def human_voice_websocket(websocket: WebSocket) -> None:
+        await app_runtime.browser_voice_websocket_endpoint(websocket)
+
     @app.get("/", response_class=Response)
     async def index(request: Request) -> Response:
         state = orchestrator.public_state()

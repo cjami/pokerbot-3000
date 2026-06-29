@@ -18,7 +18,6 @@ dependencies = [
     "pydantic",
     "python-dotenv",
     "silero-vad",
-    "sounddevice",
     "torch",
     "uvicorn[standard]",
 ]

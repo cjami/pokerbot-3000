@@ -8,10 +8,17 @@ const cameraPreview = document.querySelector("[data-public-camera-preview]");
 const zoneOverlay = document.querySelector("[data-zone-overlay]");
 const zoneSelect = document.querySelector("[data-zone-select]");
 const zoneClear = document.querySelector("[data-zone-clear]");
+const voiceForm = document.querySelector("[data-voice-form]");
+const voiceDevice = document.querySelector("[data-voice-device]");
+const voiceToggle = document.querySelector("[data-voice-toggle]");
+const voiceBrowserStatus = document.querySelector("[data-voice-browser-status]");
 
 const FRAME_INTERVAL_MS = 1500;
 const FRAME_WIDTH = 1600;
 const FRAME_MIME_TYPE = "image/png";
+const VOICE_SAMPLE_RATE = 16000;
+const VOICE_PROCESSOR_BUFFER_SIZE = 4096;
+const VOICE_CHUNK_SAMPLES = 512;
 const CAMERA_ZONE_STORAGE_KEY = "pokerbot_3000.camera_zones.v1";
 const ZONE_LABELS = {
   board: "Board",
@@ -29,6 +36,12 @@ let frameTimer = null;
 let frameInFlight = false;
 let speechQueueActive = false;
 let currentSpeechAudio = null;
+let voiceStream = null;
+let voiceSocket = null;
+let voiceAudioContext = null;
+let voiceProcessor = null;
+let voiceSource = null;
+let voicePcmRemainder = new Int16Array(0);
 let shouldPlayInitialSnapshotSpeech = false;
 let shouldSubmitBoardFrames = false;
 let pendingRevealSeat = null;
@@ -297,6 +310,10 @@ function renderClients(clients) {
 
 function renderVoiceInput(voiceInput) {
   text("[data-voice-state]", voiceInput?.state ?? "unknown");
+  text(
+    "[data-voice-source]",
+    voiceInput?.browser_connected ? "browser connected" : (voiceInput?.audio_source ?? "browser"),
+  );
   text("[data-voice-transcript]", voiceInput?.latest_transcript ?? "none");
   text("[data-voice-action]", voiceActionLabel(voiceInput?.latest_action));
   text("[data-voice-issue]", voiceInput?.last_error ?? voiceInput?.last_rejection ?? "none");
@@ -488,8 +505,7 @@ function renderSnapshot(snapshot) {
 }
 
 function connectEvents() {
-  const protocol = globalThis.location.protocol === "https:" ? "wss:" : "ws:";
-  const socket = new WebSocket(`${protocol}//${globalThis.location.host}/ws/events`);
+  const socket = new WebSocket(`${webSocketProtocol()}//${globalThis.location.host}/ws/events`);
 
   socket.addEventListener("open", () => {
     if (apiStatus) {
@@ -512,6 +528,10 @@ function connectEvents() {
     }
     globalThis.setTimeout(connectEvents, 1500);
   });
+}
+
+function webSocketProtocol() {
+  return globalThis.location.protocol === "https:" ? "wss:" : "ws:";
 }
 
 async function submitGameControl(action) {
@@ -559,6 +579,34 @@ async function loadCameraDevices() {
   }
 }
 
+async function loadVoiceDevices() {
+  if (!voiceDevice || !navigator.mediaDevices?.enumerateDevices) {
+    setVoiceBrowserStatus("Browser microphone API unavailable");
+    return;
+  }
+
+  const selectedDevice = voiceDevice.value;
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const microphones = devices.filter((device) => device.kind === "audioinput");
+  voiceDevice.replaceChildren();
+  const defaultOption = document.createElement("option");
+  defaultOption.value = "";
+  defaultOption.textContent = "Default microphone";
+  voiceDevice.append(defaultOption);
+  for (const [index, device] of microphones.entries()) {
+    const option = document.createElement("option");
+    option.value = device.deviceId;
+    option.textContent = device.label || `Microphone ${index + 1}`;
+    voiceDevice.append(option);
+  }
+  voiceDevice.value = selectedDevice;
+  if (microphones.length === 0) {
+    setVoiceBrowserStatus("No browser microphones found");
+  } else {
+    setVoiceBrowserStatus(voiceStream ? "Microphone streaming" : "Microphone idle");
+  }
+}
+
 async function ensureCameraStream() {
   if (!cameraPreview || !navigator.mediaDevices?.getUserMedia) {
     setCameraStatus("Browser camera API unavailable");
@@ -594,6 +642,144 @@ function stopCameraStream() {
     track.stop();
   }
   cameraStream = null;
+}
+
+async function chooseVoiceDevice() {
+  if (voiceStream) {
+    stopVoiceStream();
+    setVoiceBrowserStatus("Microphone idle");
+    return;
+  }
+  await startVoiceStream();
+  await loadVoiceDevices();
+}
+
+async function startVoiceStream() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    setVoiceBrowserStatus("Browser microphone API unavailable");
+    return;
+  }
+
+  const deviceId = voiceDevice?.value;
+  voiceStream = await navigator.mediaDevices.getUserMedia({
+    audio: deviceId
+      ? { deviceId: { exact: deviceId }, channelCount: 1, echoCancellation: true, noiseSuppression: true }
+      : { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+    video: false,
+  });
+  voiceSocket = new WebSocket(`${webSocketProtocol()}//${globalThis.location.host}/ws/voice/human`);
+  voiceSocket.binaryType = "arraybuffer";
+  await waitForSocketOpen(voiceSocket);
+
+  const AudioContextClass = globalThis.AudioContext || globalThis.webkitAudioContext;
+  voiceAudioContext = new AudioContextClass();
+  voiceSource = voiceAudioContext.createMediaStreamSource(voiceStream);
+  voiceProcessor = voiceAudioContext.createScriptProcessor(VOICE_PROCESSOR_BUFFER_SIZE, 1, 1);
+  voiceProcessor.onaudioprocess = submitVoiceAudioProcess;
+  voiceSource.connect(voiceProcessor);
+  voiceProcessor.connect(voiceAudioContext.destination);
+  setVoiceBrowserStatus("Microphone streaming");
+  if (voiceToggle) {
+    voiceToggle.textContent = "Stop";
+  }
+}
+
+function submitVoiceAudioProcess(event) {
+  if (!voiceSocket || voiceSocket.readyState !== WebSocket.OPEN || !voiceAudioContext) {
+    return;
+  }
+  const input = event.inputBuffer.getChannelData(0);
+  const downsampled = downsampleAudio(input, voiceAudioContext.sampleRate, VOICE_SAMPLE_RATE);
+  queueVoicePcm(floatToInt16Pcm(downsampled));
+}
+
+function downsampleAudio(buffer, inputSampleRate, outputSampleRate) {
+  if (inputSampleRate === outputSampleRate) {
+    return buffer;
+  }
+  const ratio = inputSampleRate / outputSampleRate;
+  const outputLength = Math.max(1, Math.round(buffer.length / ratio));
+  const output = new Float32Array(outputLength);
+  for (let index = 0; index < outputLength; index += 1) {
+    const start = Math.floor(index * ratio);
+    const end = Math.min(buffer.length, Math.floor((index + 1) * ratio));
+    let sum = 0;
+    for (let sourceIndex = start; sourceIndex < end; sourceIndex += 1) {
+      sum += buffer[sourceIndex];
+    }
+    output[index] = sum / Math.max(1, end - start);
+  }
+  return output;
+}
+
+function floatToInt16Pcm(buffer) {
+  const pcm = new Int16Array(buffer.length);
+  for (let index = 0; index < buffer.length; index += 1) {
+    const sample = Math.max(-1, Math.min(1, buffer[index]));
+    pcm[index] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+  }
+  return pcm;
+}
+
+function queueVoicePcm(pcm) {
+  const combined = new Int16Array(voicePcmRemainder.length + pcm.length);
+  combined.set(voicePcmRemainder);
+  combined.set(pcm, voicePcmRemainder.length);
+  let offset = 0;
+  while (combined.length - offset >= VOICE_CHUNK_SAMPLES) {
+    voiceSocket.send(combined.slice(offset, offset + VOICE_CHUNK_SAMPLES).buffer);
+    offset += VOICE_CHUNK_SAMPLES;
+  }
+  voicePcmRemainder = combined.slice(offset);
+}
+
+function waitForSocketOpen(socket) {
+  return new Promise((resolve, reject) => {
+    const handleOpen = () => {
+      cleanup();
+      resolve();
+    };
+    const handleError = () => {
+      cleanup();
+      reject(new Error("Voice socket failed."));
+    };
+    const cleanup = () => {
+      socket.removeEventListener("open", handleOpen);
+      socket.removeEventListener("error", handleError);
+    };
+    socket.addEventListener("open", handleOpen, { once: true });
+    socket.addEventListener("error", handleError, { once: true });
+  });
+}
+
+function stopVoiceStream() {
+  if (voiceProcessor) {
+    voiceProcessor.disconnect();
+    voiceProcessor.onaudioprocess = null;
+    voiceProcessor = null;
+  }
+  if (voiceSource) {
+    voiceSource.disconnect();
+    voiceSource = null;
+  }
+  if (voiceAudioContext) {
+    voiceAudioContext.close().catch(() => undefined);
+    voiceAudioContext = null;
+  }
+  if (voiceSocket) {
+    voiceSocket.close();
+    voiceSocket = null;
+  }
+  if (voiceStream) {
+    for (const track of voiceStream.getTracks()) {
+      track.stop();
+    }
+    voiceStream = null;
+  }
+  voicePcmRemainder = new Int16Array(0);
+  if (voiceToggle) {
+    voiceToggle.textContent = "Use";
+  }
 }
 
 function updateCameraFrameSubmission(waitingFor) {
@@ -701,6 +887,12 @@ function setCameraStatus(value) {
   }
 }
 
+function setVoiceBrowserStatus(value) {
+  if (voiceBrowserStatus) {
+    voiceBrowserStatus.textContent = value;
+  }
+}
+
 function startZoneDrag(event) {
   if (!zoneOverlay || !zoneSelect) {
     return;
@@ -760,6 +952,16 @@ if (cameraForm) {
   });
 }
 
+if (voiceForm) {
+  voiceForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    chooseVoiceDevice().catch(() => {
+      stopVoiceStream();
+      setVoiceBrowserStatus("Microphone start failed");
+    });
+  });
+}
+
 if (zoneOverlay) {
   zoneOverlay.addEventListener("pointerdown", startZoneDrag);
   zoneOverlay.addEventListener("pointermove", moveZoneDrag);
@@ -784,4 +986,5 @@ if (zoneClear) {
 
 renderCameraZones();
 await loadCameraDevices().catch(() => setCameraStatus("Camera permission needed"));
+await loadVoiceDevices().catch(() => setVoiceBrowserStatus("Microphone permission needed"));
 connectEvents();

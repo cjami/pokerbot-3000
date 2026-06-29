@@ -1,4 +1,5 @@
 import asyncio
+import time
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -15,6 +16,7 @@ from pokerbot_3000.domain.models import HumanActionInput, PrivateCardObservation
 from pokerbot_3000.orchestrator import InMemoryOrchestrator
 from pokerbot_3000.ports.llm import ImageFrame
 from pokerbot_3000.ports.perception import PublicVisionSource
+from pokerbot_3000.voice import BrowserAudioInput
 
 
 class NoopPublicVision:
@@ -290,6 +292,22 @@ def test_websocket_receives_initial_snapshot_and_start_update():
     assert update["type"] == "snapshot"
     assert update["state"]["waiting_for"]["type"] == "public_board_cards"
     assert "game_started" in {event["event_type"] for event in update["events"]}
+
+
+def test_voice_websocket_queues_browser_pcm_chunks():
+    runtime = build_test_runtime()
+    runtime.browser_voice_input = BrowserAudioInput()
+    client = TestClient(create_app(runtime))
+
+    with client.websocket_connect("/ws/voice/human") as websocket:
+        websocket.send_bytes(b"\x00\x01" * 512)
+        for _ in range(20):
+            if runtime.browser_voice_input.pending_chunk_count:
+                break
+            time.sleep(0.01)
+
+    assert runtime.browser_voice_input.pending_chunk_count == 1
+    assert runtime.browser_voice_input.connected is False
 
 
 def test_orchestrator_voice_endpoint_returns_audio_for_presentation_event():
