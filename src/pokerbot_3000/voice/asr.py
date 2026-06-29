@@ -15,7 +15,8 @@ from pokerbot_3000.ports.voice import AudioChunk, VoiceTranscript
 from pokerbot_3000.voice.capture import VoiceRuntimeError
 
 POKERBOT_VOICE_MODEL_ENV: Final = "POKERBOT_VOICE_MODEL"
-DEFAULT_PARAKEET_MODEL: Final = "nvidia/parakeet-unified-en-0.6b"
+DEFAULT_PARAKEET_MODEL: Final = "parakeet-tdt_ctc-110m"
+LEGACY_UNIFIED_PARAKEET_MODEL: Final = "nvidia/parakeet-unified-en-0.6b"
 
 
 class _ParakeetModel(Protocol):
@@ -32,7 +33,7 @@ class ParakeetConfig:
     @classmethod
     def from_env(cls) -> ParakeetConfig:
         """Load ASR settings from environment variables."""
-        return cls(model_name=os.getenv(POKERBOT_VOICE_MODEL_ENV, DEFAULT_PARAKEET_MODEL))
+        return cls(model_name=_compatible_model_name(os.getenv(POKERBOT_VOICE_MODEL_ENV)))
 
 
 class ParakeetSpeechTranscriber:
@@ -70,7 +71,7 @@ class ParakeetSpeechTranscriber:
                 nemo_asr.models.ASRModel.from_pretrained(model_name=self._config.model_name),
             )
         except Exception as exc:  # pragma: no cover - environment dependent
-            msg = f"Parakeet model initialization failed: {exc}"
+            msg = _model_initialization_error(self._config.model_name, exc)
             raise VoiceRuntimeError(msg) from exc
         return self._model
 
@@ -88,3 +89,21 @@ def _extract_text(result: object) -> str:
         first = result[0]
         return str(getattr(first, "text", first)).strip()
     return str(result).strip()
+
+
+def _compatible_model_name(model_name: str | None) -> str:
+    if not model_name:
+        return DEFAULT_PARAKEET_MODEL
+    if model_name == LEGACY_UNIFIED_PARAKEET_MODEL:
+        return DEFAULT_PARAKEET_MODEL
+    return model_name
+
+
+def _model_initialization_error(model_name: str, exc: Exception) -> str:
+    detail = str(exc)
+    if "att_chunk_context_size" in detail:
+        return (
+            f"Parakeet model initialization failed for {model_name!r}: {detail}. "
+            f"Use {POKERBOT_VOICE_MODEL_ENV}={DEFAULT_PARAKEET_MODEL} with the locked NeMo runtime."
+        )
+    return f"Parakeet model initialization failed for {model_name!r}: {detail}"
