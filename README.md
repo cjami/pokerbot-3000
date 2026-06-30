@@ -1,6 +1,29 @@
-# Pokerbot 3000
+# PokerBot 3000
 
-PokerBot 3000 is a live multimodal poker experience powered by Gemma 4 31B via Cerebras, starring Reachy Mini and friendbot Eliza.
+PokerBot 3000 is a live poker demo with one human player, Reachy Mini, and Eliza. Gemma 4 31B via Cerebras reads cards and chooses agent actions, while ElevenLabs handles speech and transcription.
+
+## What It Does
+
+- Runs a three-seat no-limit Hold'em table with a human, Reachy, and Eliza.
+- Uses browser cameras to read the public board, private agent cards, and showdown reveals.
+- Takes clear human poker actions and table talk from the browser microphone.
+- Streams live game state, events, voice, and client status to the operator dashboard.
+
+## Live Session Flow
+
+1. Start the session from the dashboard.
+2. Select camera and microphone devices in the browser.
+3. Let the dashboard capture board cards when the game asks for them.
+4. Let Eliza and Reachy submit private-card views from their thin clients or bridge.
+5. Speak human actions such as `call`, `check`, `raise to 100`, or `all in`.
+6. Watch agent decisions, speech, presentation events, showdown resolution, and the next hand.
+
+## How It Works
+
+- The dashboard shows the table state and captures public board frames when the game needs cards.
+- Eliza and Reachy provide private-card views so each agent can act with hidden information.
+- The orchestrator advances the hand until it needs a human action, card view, agent decision, or presentation to finish.
+- Gemma reads cards, responds to table talk, and chooses agent actions; ElevenLabs turns speech into audio and human voice into text.
 
 ## Tech Stack
 
@@ -26,7 +49,7 @@ The local app defaults to `http://127.0.0.1:8000/`.
 
 ## Development
 
-Create a local `.env` file for Cerebras access:
+Create a local `.env` file for Cerebras and ElevenLabs access:
 
 ```shell
 CEREBRAS_API_KEY=your_cerebras_api_key_here
@@ -49,12 +72,12 @@ POKERBOT_VAD_MIN_PHRASE_MS=220
 POKERBOT_VAD_MAX_PHRASE_MS=8000
 ```
 
-The dashboard uses the browser camera API for public-board frames, so OBS Virtual Camera and other browser-visible devices can be selected directly in the app.
-Human voice input uses the browser microphone selector and streams 16 kHz mono PCM to the server-side energy VAD + ElevenLabs Scribe pipeline.
+The dashboard uses browser-visible cameras for public-board frames, including OBS Virtual Camera.
+Human voice input uses the browser microphone selector and streams 16 kHz mono PCM to the server-side VAD and ElevenLabs Scribe pipeline.
 Eliza's thin client is available at `http://127.0.0.1:8000/clients/eliza`.
 For another machine on the local network, start the app with `make app` and open `http://<host-ip>:8000/clients/eliza`.
 Chrome and Edge block camera access on insecure LAN origins by default; on the Eliza machine, open `chrome://flags/#unsafely-treat-insecure-origin-as-secure`, add `http://<host-ip>:8000`, enable the flag, and relaunch the browser.
-Reachy Mini can be connected with `make reachy-bridge`. By default this uses `http://reachy-mini.local:8000/`; override it with `make reachy-bridge REACHY_DAEMON_URL=http://10.0.0.39:8000/`.
+Reachy Mini can be connected with `make reachy-bridge`.
 
 Check model access without starting the web server:
 
@@ -79,5 +102,5 @@ uv run pytest
 uv run ruff check .
 uv run ty check
 npm exec -- tailwindcss -i src/pokerbot_3000/web/static/input.css -o build/web/static/styles.css --minify
-npm exec -- esbuild src/pokerbot_3000/web/static/app.js --bundle --minify --format=esm --outfile=build/web/static/app.js
+npm exec -- esbuild src/pokerbot_3000/web/static/app.js src/pokerbot_3000/web/static/eliza.js --bundle --minify --format=esm --outdir=build/web/static
 ```

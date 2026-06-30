@@ -1,1 +1,1 @@
-"""Test package for Pokerbot 3000."""
+"""Test package for PokerBot 3000."""

@@ -1,4 +1,4 @@
-"""Thin Reachy Mini bridge for Pokerbot 3000."""
+"""Thin Reachy Mini bridge for PokerBot 3000."""
 
 from __future__ import annotations
 
@@ -110,10 +110,10 @@ class UrllibBridgeHttpClient:
                 return response.read()
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            msg = f"Pokerbot API returned HTTP {exc.code}: {detail}"
+            msg = f"PokerBot API returned HTTP {exc.code}: {detail}"
             raise BridgeError(msg) from exc
         except URLError as exc:
-            msg = f"Could not reach Pokerbot API: {exc}"
+            msg = f"Could not reach PokerBot API: {exc}"
             raise BridgeError(msg) from exc
 
     def post_json(self, path: str, payload: dict[str, Any]) -> JsonResponse:
@@ -137,10 +137,10 @@ class UrllibBridgeHttpClient:
                 return json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            msg = f"Pokerbot API returned HTTP {exc.code}: {detail}"
+            msg = f"PokerBot API returned HTTP {exc.code}: {detail}"
             raise BridgeError(msg) from exc
         except (URLError, json.JSONDecodeError) as exc:
-            msg = f"Could not reach Pokerbot API: {exc}"
+            msg = f"Could not reach PokerBot API: {exc}"
             raise BridgeError(msg) from exc
 
 
@@ -500,7 +500,7 @@ def main(argv: list[str] | None = None) -> None:
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="pokerbot-reachy-bridge", description="Run the Reachy Mini thin bridge.")
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Pokerbot app base URL.")
+    parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="PokerBot app base URL.")
     parser.add_argument("--poll-seconds", default=DEFAULT_POLL_SECONDS, type=float, help="Polling interval.")
     parser.add_argument("--source", default=DEFAULT_SOURCE, help="Private-card frame source label.")
     parser.add_argument(

@@ -1,4 +1,4 @@
-"""FastAPI application factory for Pokerbot 3000."""
+"""FastAPI application factory for PokerBot 3000."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def create_app(runtime: DashboardRuntime | None = None) -> FastAPI:
         finally:
             await app_runtime.shutdown()
 
-    app = FastAPI(title="Pokerbot 3000", lifespan=lifespan)
+    app = FastAPI(title="PokerBot 3000", lifespan=lifespan)
     orchestrator = app_runtime.orchestrator
     app.state.runtime = app_runtime
     app.state.orchestrator = orchestrator
@@ -72,7 +72,7 @@ def create_app(runtime: DashboardRuntime | None = None) -> FastAPI:
             request=request,
             name="index.html.jinja",
             context={
-                "app_name": "Pokerbot 3000",
+                "app_name": "PokerBot 3000",
                 "client_statuses": orchestrator.client_statuses().values(),
                 "events": orchestrator.events(limit=8),
                 "players": sorted(state.players.items()),

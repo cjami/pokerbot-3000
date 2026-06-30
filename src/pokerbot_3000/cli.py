@@ -1,4 +1,4 @@
-"""Command-line entry point for Pokerbot 3000."""
+"""Command-line entry point for PokerBot 3000."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ APP_IMPORT_STRING: Final = "pokerbot_3000.app.server:create_app"
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Launch the local Pokerbot 3000 web application."""
+    """Launch the local PokerBot 3000 web application."""
     args = _parse_args(argv)
     if args.check_llm:
         asyncio.run(_check_llm())
@@ -38,7 +38,7 @@ def main(argv: list[str] | None = None) -> None:
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="pokerbot-3000", description="Launch the Pokerbot 3000 local web app.")
+    parser = argparse.ArgumentParser(prog="pokerbot-3000", description="Launch the PokerBot 3000 local web app.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "--check-llm",

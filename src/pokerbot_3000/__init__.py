@@ -1,3 +1,3 @@
-"""Pokerbot 3000 package."""
+"""PokerBot 3000 package."""
 
 __version__ = "0.1.0"

@@ -259,7 +259,7 @@ def test_index_renders_starter_page():
     response = client.get("/")
 
     assert response.status_code == 200
-    assert "Pokerbot 3000" in response.text
+    assert "PokerBot 3000" in response.text
     assert "Table Camera" in response.text
     assert "/static/styles.css" in response.text
     assert "/static/app.js?v=" in response.text

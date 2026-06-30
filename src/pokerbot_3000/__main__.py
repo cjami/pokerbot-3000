@@ -1,4 +1,4 @@
-"""Run Pokerbot 3000 as a module."""
+"""Run PokerBot 3000 as a module."""
 
 from __future__ import annotations
 
