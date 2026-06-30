@@ -1,6 +1,6 @@
 # PokerBot 3000
 
-PokerBot 3000 is a live poker demo with one human player, Reachy Mini, and Eliza. Gemma 4 31B via Cerebras reads cards and chooses agent actions, while ElevenLabs handles speech and transcription.
+PokerBot 3000 is a live multimodal poker experience powered by Gemma 4 31B via Cerebras, starring Reachy Mini and friendbot Eliza.
 
 ## What It Does
 
@@ -20,10 +20,11 @@ PokerBot 3000 is a live poker demo with one human player, Reachy Mini, and Eliza
 
 ## How It Works
 
-- The dashboard shows the table state and captures public board frames when the game needs cards.
-- Eliza and Reachy provide private-card views so each agent can act with hidden information.
-- The orchestrator advances the hand until it needs a human action, card view, agent decision, or presentation to finish.
-- Gemma reads cards, responds to table talk, and chooses agent actions; ElevenLabs turns speech into audio and human voice into text.
+- Gemma 4 acts as a VLM for live card recognition, reading public-board frames, private-card views, and showdown reveals.
+- The poker engine advances until it needs outside input, then resumes when a camera, voice, agent, or presentation event arrives.
+- Shared game state and event streams keep the dashboard, Eliza, and Reachy coordinated while private-card views stay scoped to each agent.
+- Gemma 4 also handles table talk and chooses agent actions; ElevenLabs transcribes the human and voices the agents.
+- Presentation events carry emotion and gesture cues, so Eliza can show an emoji face and Reachy can move with the moment.
 
 ## Tech Stack
 
