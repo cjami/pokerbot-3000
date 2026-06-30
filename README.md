@@ -16,7 +16,7 @@ PokerBot 3000 is a live multimodal poker experience powered by Gemma 4 31B via C
 3. Let the dashboard capture board cards when the game asks for them.
 4. Let Eliza and Reachy submit private-card views from their thin clients or bridge.
 5. Speak human actions such as `call`, `check`, `raise to 100`, or `all in`.
-6. Watch agent decisions, speech, presentation events, showdown resolution, and the next hand.
+6. Watch agents decide and talk as each hand plays out; the engine accurately resolves showdowns as needed.
 
 ## How It Works
 
