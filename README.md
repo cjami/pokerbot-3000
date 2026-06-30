@@ -5,8 +5,8 @@ PokerBot 3000 is a live multimodal poker experience powered by Gemma 4 31B via C
 ## What It Does
 
 - Runs a three-seat no-limit Hold'em table with a human, Reachy, and Eliza.
-- Uses browser cameras to read the public board, private agent cards, and showdown reveals.
-- Takes clear human poker actions and table talk from the browser microphone.
+- Uses cameras to read the public board, private agent cards, and showdown reveals.
+- Takes clear human poker actions and table talk from a microphone.
 - Streams live game state, events, voice, and client status to the operator dashboard.
 
 ## Live Session Flow
@@ -22,7 +22,7 @@ PokerBot 3000 is a live multimodal poker experience powered by Gemma 4 31B via C
 
 - Gemma 4 acts as a VLM for live card recognition, reading public-board frames, private-card views, and showdown reveals.
 - The poker engine advances until it needs outside input, then resumes when a camera, voice, agent, or presentation event arrives.
-- Shared game state and event streams keep the dashboard, Eliza, and Reachy coordinated while private-card views stay scoped to each agent.
+- Shared game state and event streams keep the dashboard, Eliza, and Reachy coordinated while private cards stay hidden from the other players.
 - Gemma 4 also handles table talk and chooses agent actions; ElevenLabs transcribes the human and voices the agents.
 - Presentation events carry emotion and gesture cues, so Eliza can show an emoji face and Reachy can move with the moment.
 
